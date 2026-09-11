@@ -122,3 +122,28 @@ def test_saved_output_uses_google_response_and_all_day_exclusive_end():
         {"start": {"date": "2026-09-17"}, "end": {"date": "2026-09-19"}}
     )
     assert "Elapsed duration" not in _saved_event_times({})
+
+
+def test_saved_duration_uses_elapsed_time_across_a_dst_transition():
+    result = _saved_event_times(
+        {
+            "start": {
+                "dateTime": "2026-03-08T01:30:00-08:00",
+                "timeZone": "America/Los_Angeles",
+            },
+            "end": {
+                "dateTime": "2026-03-08T03:30:00-07:00",
+                "timeZone": "America/Los_Angeles",
+            },
+        }
+    )
+    assert "Elapsed duration: 60 minutes" in result
+
+
+@pytest.mark.parametrize("boundary", [None, [], {"dateTime": "bad"}, {"dateTime": 12}])
+def test_malformed_saved_boundary_does_not_turn_a_successful_write_into_an_error(
+    boundary,
+):
+    assert "Elapsed duration" not in _saved_event_times(
+        {"start": boundary, "end": {"dateTime": "2026-09-17T11:35:00-07:00"}}
+    )

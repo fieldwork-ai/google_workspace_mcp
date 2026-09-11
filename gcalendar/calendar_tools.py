@@ -23,6 +23,7 @@ from gcalendar.calendar_helpers import (
     _format_event_detail_lines,
     _format_event_time,
     _get_meeting_link,
+    parse_event_boundary,
 )
 
 from mcp.types import ToolAnnotations
@@ -328,30 +329,25 @@ def _build_time_boundary(time_value: str, timezone: Optional[str]) -> Dict[str, 
 
 
 def _saved_event_times(event: Dict[str, Any]) -> str:
-    start, end = event.get("start", {}), event.get("end", {})
+    start = parse_event_boundary(event, "start")
+    end = parse_event_boundary(event, "end")
     lines = [
         f"Saved start: {_format_event_time(event, 'start')}",
         f"Saved end: {_format_event_time(event, 'end')}",
     ]
-    try:
-        if start.get("dateTime") and end.get("dateTime"):
-            a = datetime.datetime.fromisoformat(
-                start["dateTime"].replace("Z", "+00:00")
+    if start and end:
+        if start.moment and end.moment:
+            # Subtraction in a shared ZoneInfo uses wall time across DST changes.
+            utc = datetime.timezone.utc
+            seconds = (
+                end.moment.astimezone(utc) - start.moment.astimezone(utc)
+            ).total_seconds()
+            lines.append(
+                f"Elapsed duration: {seconds / 60:g} minutes ({seconds:g} seconds)"
             )
-            b = datetime.datetime.fromisoformat(end["dateTime"].replace("Z", "+00:00"))
-            if a.tzinfo is not None and b.tzinfo is not None:
-                seconds = (b - a).total_seconds()
-                lines.append(
-                    f"Elapsed duration: {seconds / 60:g} minutes ({seconds:g} seconds)"
-                )
-        elif start.get("date") and end.get("date"):
-            days = (
-                datetime.date.fromisoformat(end["date"])
-                - datetime.date.fromisoformat(start["date"])
-            ).days
+        elif start.is_all_day and end.is_all_day:
+            days = (end.local_date - start.local_date).days
             lines.append(f"All-day span: {days} days (end date exclusive)")
-    except (ValueError, TypeError):
-        pass
     return "\n" + "\n".join(lines)
 
 
