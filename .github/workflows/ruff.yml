@@ -2,9 +2,9 @@ name: Ruff
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main, fieldwork-v1.25.2 ]
   push:
-    branches: [ main ]
+    branches: [ main, fieldwork-v1.25.2 ]
 
 permissions:
   contents: read
