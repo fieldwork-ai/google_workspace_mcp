@@ -299,8 +299,9 @@ def _build_time_boundary(time_value: str, timezone: Optional[str]) -> Dict[str, 
     Each boundary carries its OWN ``timeZone``, which is what makes a cross-timezone
     event expressible: a flight departing 13:45 Asia/Jerusalem and landing 17:50
     Europe/Amsterdam is one event whose two ends are authored in different zones.
-    Forcing a single zone on both ends silently rewrites one of them -- the arrival
-    above becomes 17:50 Israel time, an hour off, with no error raised.
+    An explicit UTC offset identifies an instant; converting it to the boundary
+    zone must preserve that instant. Without an offset, Google resolves the local
+    wall-clock time in the supplied zone.
     """
     if "T" not in time_value:
         return {"date": time_value}
