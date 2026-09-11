@@ -293,31 +293,6 @@ def _correct_time_format_for_api(
     return time_str
 
 
-def _strip_utc_offset(datetime_str: str) -> str:
-    """Strip UTC offset from an RFC3339 dateTime string, returning a naive local time.
-
-    When an IANA timezone (e.g. America/Los_Angeles) is provided alongside a dateTime,
-    the Google Calendar API uses the explicit offset from dateTime for scheduling and
-    only uses the IANA timezone for recurrence expansion. This means an LLM-generated
-    offset that doesn't account for DST (e.g. -08:00 during PDT) will place the event
-    at the wrong wall-clock time.
-
-    By stripping the offset and keeping only the naive local time + IANA timeZone,
-    Google Calendar resolves the correct DST-aware offset automatically.
-
-    Examples:
-        "2026-03-19T12:00:00-08:00" → "2026-03-19T12:00:00"
-        "2026-03-19T12:00:00-07:00" → "2026-03-19T12:00:00"
-        "2026-03-19T12:00:00Z"      → "2026-03-19T12:00:00"
-        "2026-03-19T12:00:00"       → "2026-03-19T12:00:00" (no-op)
-    """
-    # Strip trailing Z
-    if datetime_str.endswith("Z"):
-        return datetime_str[:-1]
-    # Strip +HH:MM or -HH:MM offset at end (e.g. -07:00, +05:30)
-    return re.sub(r"[+-]\d{2}:\d{2}$", "", datetime_str)
-
-
 def _build_time_boundary(time_value: str, timezone: Optional[str]) -> Dict[str, str]:
     """Build one Google ``start``/``end`` boundary from a time string and its zone.
 
@@ -339,15 +314,44 @@ def _build_time_boundary(time_value: str, timezone: Optional[str]) -> Dict[str, 
     # be worse than erroring: it silently discards the zone the caller asked for and
     # books the event somewhere else.
     try:
-        ZoneInfo(timezone)
+        zone = ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise ValueError(
             f"Unrecognized IANA timezone {timezone!r}. Use a zone name such as "
             "'America/New_York' or 'Europe/Amsterdam'."
         ) from exc
-    # With an IANA zone present, drop any caller-supplied offset so Google resolves
-    # the DST-correct one from the zone name itself (see _strip_utc_offset).
-    return {"dateTime": _strip_utc_offset(time_value), "timeZone": timezone}
+    parsed = datetime.datetime.fromisoformat(time_value.replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        time_value = parsed.astimezone(zone).isoformat()
+    return {"dateTime": time_value, "timeZone": timezone}
+
+
+def _saved_event_times(event: Dict[str, Any]) -> str:
+    start, end = event.get("start", {}), event.get("end", {})
+    lines = [
+        f"Saved start: {_format_event_time(event, 'start')}",
+        f"Saved end: {_format_event_time(event, 'end')}",
+    ]
+    try:
+        if start.get("dateTime") and end.get("dateTime"):
+            a = datetime.datetime.fromisoformat(
+                start["dateTime"].replace("Z", "+00:00")
+            )
+            b = datetime.datetime.fromisoformat(end["dateTime"].replace("Z", "+00:00"))
+            if a.tzinfo is not None and b.tzinfo is not None:
+                seconds = (b - a).total_seconds()
+                lines.append(
+                    f"Elapsed duration: {seconds / 60:g} minutes ({seconds:g} seconds)"
+                )
+        elif start.get("date") and end.get("date"):
+            days = (
+                datetime.date.fromisoformat(end["date"])
+                - datetime.date.fromisoformat(start["date"])
+            ).days
+            lines.append(f"All-day span: {days} days (end date exclusive)")
+    except (ValueError, TypeError):
+        pass
+    return "\n" + "\n".join(lines)
 
 
 @server.tool(
@@ -895,6 +899,8 @@ async def _create_event_impl(
     link = created_event.get("htmlLink", "No link available")
     confirmation_message = f"Successfully created event '{created_event.get('summary', summary)}' for {user_google_email}. Link: {link}"
 
+    confirmation_message += _saved_event_times(created_event)
+
     # Surface the conferencing link (native Meet or third-party add-on) if present
     if add_google_meet or conference_data is not None:
         meeting_link = _get_meeting_link(created_event)
@@ -1164,6 +1170,8 @@ async def _modify_event_impl(
     link = updated_event.get("htmlLink", "No link available")
     confirmation_message = f"Successfully modified event '{updated_event.get('summary', summary)}' (ID: {event_id}) for {user_google_email}. Link: {link}"
 
+    confirmation_message += _saved_event_times(updated_event)
+
     # Surface the conferencing link (native Meet or third-party add-on) if present
     if conference_data is not None:
         meeting_link = _get_meeting_link(updated_event)
@@ -1356,20 +1364,22 @@ async def manage_event(
         user_google_email (str): The user's Google email address. Required.
         action (str): Action to perform - "create", "update", "delete", or "rsvp".
         summary (Optional[str]): Event title (required for create).
-        start_time (Optional[str]): Start time in RFC3339 format (required for create).
-        end_time (Optional[str]): End time in RFC3339 format (required for create).
+        start_time (Optional[str]): Start time (required for create). An RFC3339 UTC offset identifies the exact instant and is preserved. Without an offset, supply start_timezone or timezone. Date-only values create all-day events.
+        end_time (Optional[str]): End time (required for create). An RFC3339 UTC offset identifies the exact instant and is preserved. Without an offset, supply end_timezone or timezone. All-day end dates are exclusive.
         event_id (Optional[str]): Event ID (required for update and delete).
         calendar_id (str): Calendar ID (default: 'primary').
         description (Optional[str]): Event description.
         location (Optional[str]): Event location.
         attendees (Optional[Union[List[str], List[Dict[str, Any]]]]): Attendee email addresses or objects.
         timezone (Optional[str]): IANA timezone applied to both boundaries (e.g.,
-            "America/New_York"). Overridden per boundary by start_timezone/end_timezone.
+            "America/New_York"). Converts offset-bearing timestamps without changing their
+            instant; interprets offset-free timestamps as local times in this zone.
+            Overridden per boundary by start_timezone/end_timezone.
         start_timezone (Optional[str]): IANA timezone for the start boundary only,
             overriding timezone. Use for events whose two ends sit in different zones -
             a flight departing 13:45 "Asia/Jerusalem" and landing 17:50
-            "Europe/Amsterdam" is one event authored in two zones. Passing a single
-            timezone for such an event silently rewrites one end's wall-clock.
+            "Europe/Amsterdam" is one event authored in two zones. Explicit timestamp
+            offsets always preserve the instant, even when the zone differs.
         end_timezone (Optional[str]): IANA timezone for the end boundary only,
             overriding timezone. See start_timezone.
         attachments (Optional[List[str]]): List of Google Drive file URLs or IDs to attach.
