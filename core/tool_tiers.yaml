@@ -7,6 +7,7 @@ gmail:
 
   extended:
     - get_gmail_attachment_content
+    - save_gmail_attachment_to_drive
     - get_gmail_thread_content
     - modify_gmail_message_labels
     - list_gmail_labels
