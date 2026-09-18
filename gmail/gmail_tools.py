@@ -28,7 +28,7 @@ from pydantic import Field
 from pydantic.json_schema import SkipJsonSchema
 
 from auth.oauth_config import is_stateless_mode
-from auth.service_decorator import require_google_service
+from auth.service_decorator import require_google_service, require_multiple_services
 from core.attachment_storage import (
     get_attachment_storage,
     get_attachment_url,
@@ -72,6 +72,7 @@ from gmail.gmail_helpers import (
     _signature_html_to_text,
     html_to_text_preserving_breaks,
 )
+from gmail.attachment_transfer import save_attachment_to_drive
 
 logger = logging.getLogger(__name__)
 
@@ -2083,7 +2084,11 @@ async def get_gmail_attachment_content(
     Downloads an email attachment and saves it to local disk.
 
     In stdio mode, returns the local file path for direct access.
-    In HTTP mode, returns a temporary download URL (valid for 1 hour).
+    In stateful HTTP mode, returns a temporary download URL (valid for 1 hour).
+    In stateless mode, returns only a short base64 preview unless return_base64
+    is True; no file or download URL is created. To file an attachment in
+    Google Drive, use save_gmail_attachment_to_drive instead of passing base64
+    through the conversation.
     May re-fetch message metadata to resolve filename and MIME type.
 
     Args:
@@ -2264,6 +2269,66 @@ async def get_gmail_attachment_content(
         if return_base64 and base64_data:
             result_lines.extend(_format_base64_content_block(base64_data))
         return "\n".join(result_lines)
+
+
+@server.tool(
+    title="Save Gmail Attachment to Drive",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("save_gmail_attachment_to_drive")
+@require_multiple_services(
+    [
+        {
+            "service_type": "gmail",
+            "scopes": "gmail_read",
+            "param_name": "gmail_service",
+        },
+        {
+            "service_type": "drive",
+            "scopes": "drive_file",
+            "param_name": "drive_service",
+        },
+    ]
+)
+async def save_gmail_attachment_to_drive(
+    gmail_service,
+    drive_service,
+    user_google_email: str,
+    message_id: str,
+    attachment_id: str,
+    folder_id: str,
+    file_name: Optional[str] = None,
+) -> dict:
+    """Save an original Gmail attachment directly to Google Drive, up to 25 MiB.
+
+    Works in stateless/headless runs: bytes stay on the server, with no base64,
+    local paths, download URLs or CLI needed. Select message_id and attachment_id
+    from get_gmail_message_content. folder_id is an explicit writable Drive folder
+    ID (not a shortcut), including folders in shared drives. Gmail and Drive use
+    the same authenticated Google account. file_name optionally overrides the
+    original attachment name; contents and MIME type are preserved.
+
+    Returns a compact receipt with status created or existing, file_id, link,
+    name, MIME type, byte size and MD5 checksum after verifying the saved file.
+    A sequential retry returns the existing verified copy in that folder, even
+    if file_name changed; it does not rename or overwrite it. Concurrent copies
+    are not deduplicated atomically. On an unconfirmed upload, inspect the file ID
+    in the error before retrying. Mark an invoice as filed only after a receipt.
+    """
+    return await save_attachment_to_drive(
+        gmail_service,
+        drive_service,
+        user_google_email,
+        message_id,
+        attachment_id,
+        folder_id,
+        file_name,
+    )
 
 
 @server.tool(
