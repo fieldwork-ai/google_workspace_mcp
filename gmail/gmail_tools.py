@@ -780,7 +780,7 @@ def _extract_attachments(payload: dict) -> List[Dict[str, Any]]:
         payload: The message payload from Gmail API
 
     Returns:
-        List of attachment dictionaries with filename, mimeType, size, and attachmentId
+        List of attachment dictionaries with filename, mimeType, size, partId, and attachmentId
     """
     attachments = []
 
@@ -794,6 +794,7 @@ def _extract_attachments(payload: dict) -> List[Dict[str, Any]]:
                     "mimeType": part.get("mimeType", "application/octet-stream"),
                     "size": part.get("body", {}).get("size", 0),
                     "attachmentId": part["body"]["attachmentId"],
+                    "partId": part.get("partId"),
                 }
             )
 
@@ -1835,6 +1836,7 @@ async def get_gmail_message_content(
             size_kb = att["size"] / 1024
             content_lines.append(
                 f"{i}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
+                f"   Part ID: {att['partId']} (use as part_id when saving to Drive)\n"
                 f"   Attachment ID: {att['attachmentId']}\n"
                 f"   Use get_gmail_attachment_content(message_id='{message_id}', attachment_id='{att['attachmentId']}') to download"
             )
@@ -2036,6 +2038,7 @@ async def get_gmail_messages_content_batch(
                             size_kb = att["size"] / 1024
                             msg_output += (
                                 f"{i}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
+                                f"   Part ID: {att['partId']} (use as part_id when saving to Drive)\n"
                                 f"   Attachment ID: {att['attachmentId']}\n"
                                 f"   Use get_gmail_attachment_content(message_id='{mid}', attachment_id='{att['attachmentId']}') to download\n"
                             )
@@ -2300,15 +2303,19 @@ async def save_gmail_attachment_to_drive(
     drive_service,
     user_google_email: str,
     message_id: str,
-    attachment_id: str,
     folder_id: str,
+    attachment_id: Optional[str] = None,
     file_name: Optional[str] = None,
+    part_id: Optional[str] = None,
 ) -> dict:
     """Save an original Gmail attachment directly to Google Drive, up to 25 MiB.
 
     Works in stateless/headless runs: bytes stay on the server, with no base64,
-    local paths, download URLs or CLI needed. Select message_id and attachment_id
-    from get_gmail_message_content. folder_id is an explicit writable Drive folder
+    local paths, download URLs or CLI needed. Select message_id and the stable
+    Part ID (part_id) from get_gmail_message_content. Gmail's download attachment_id
+    can change between fetches: prefer part_id, which takes precedence if both
+    are supplied. attachment_id alone is supported only when it still matches.
+    folder_id is an explicit writable Drive folder
     ID (not a shortcut), including folders in shared drives. Gmail and Drive use
     the same authenticated Google account. file_name optionally overrides the
     original attachment name; contents and MIME type are preserved.
@@ -2328,6 +2335,7 @@ async def save_gmail_attachment_to_drive(
         attachment_id,
         folder_id,
         file_name,
+        part_id=part_id,
     )
 
 
@@ -3267,6 +3275,7 @@ def _format_thread_content(
                 size_kb = att["size"] / 1024
                 content_lines.append(
                     f"{j}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
+                    f"   Part ID: {att['partId']} (use as part_id when saving to Drive)\n"
                     f"   Attachment ID: {att['attachmentId']}\n"
                     f"   Use get_gmail_attachment_content(message_id='{message_id}', attachment_id='{att['attachmentId']}') to download"
                 )
