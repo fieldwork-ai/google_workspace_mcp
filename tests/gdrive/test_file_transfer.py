@@ -203,13 +203,12 @@ async def test_verification_detects_drive_corruption(fixture):
         await transfer(fixture)
 
 
-@pytest.mark.asyncio
-async def test_schema_and_scope_are_registered():
+def test_schema_and_scope_are_registered():
     from gdrive.drive_tools import upload_file_to_drive  # noqa: F401
     from core.server import server
     from core.tool_registry import get_tool_components
 
-    tool = await server.get_tool("upload_file_to_drive")
+    tool = get_tool_components(server)["upload_file_to_drive"]
     assert tool.annotations.readOnlyHint is False
     assert tool.annotations.idempotentHint is False
     assert {
