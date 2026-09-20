@@ -18,11 +18,19 @@ FILE_FIELDS = "id,name,mimeType,size,md5Checksum,webViewLink,parents,trashed"
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 
 
-def _attachment_part(payload: dict, attachment_id: str) -> tuple[dict, str]:
+def _attachment_part(
+    payload: dict, attachment_id: str | None, part_id: str | None
+) -> tuple[dict, str]:
     matches = []
 
     def visit(part: dict, path: str):
-        if part.get("body", {}).get("attachmentId") == attachment_id:
+        # Download IDs can change on every fetch; partId is immutable within a message.
+        selected = (
+            "partId" in part and part["partId"] == part_id
+            if part_id is not None
+            else part.get("body", {}).get("attachmentId") == attachment_id
+        )
+        if selected:
             matches.append((part, path))
         for index, child in enumerate(part.get("parts", [])):
             visit(child, f"{path}.{index}")
@@ -30,8 +38,9 @@ def _attachment_part(payload: dict, attachment_id: str) -> tuple[dict, str]:
     visit(payload, "0")
     if len(matches) != 1:
         raise UserInputError(
-            "Attachment ID must identify exactly one MIME part in this message. "
-            "Fetch the message again to obtain its attachment IDs."
+            "Attachment selector must identify exactly one MIME part in this message. "
+            "Use the Part ID from get_gmail_message_content as part_id; "
+            "Gmail download attachment IDs can change between fetches."
         )
     return matches[0]
 
@@ -72,12 +81,15 @@ async def save_attachment_to_drive(
     drive_service,
     user_google_email: str,
     message_id: str,
-    attachment_id: str,
+    attachment_id: str | None,
     folder_id: str,
     file_name: str | None = None,
+    part_id: str | None = None,
 ) -> dict:
-    if not all(value.strip() for value in (message_id, attachment_id, folder_id)):
-        raise UserInputError("message_id, attachment_id and folder_id are required.")
+    if not all(value.strip() for value in (message_id, folder_id)):
+        raise UserInputError("message_id and folder_id are required.")
+    if part_id is None and (attachment_id is None or not attachment_id.strip()):
+        raise UserInputError("part_id (preferred) or attachment_id is required.")
     if file_name is not None and not file_name.strip():
         raise UserInputError("file_name must not be blank.")
 
@@ -106,7 +118,12 @@ async def save_attachment_to_drive(
         .get(userId="me", id=message_id, format="full")
         .execute
     )
-    part, part_path = _attachment_part(message.get("payload", {}), attachment_id)
+    part, part_path = _attachment_part(
+        message.get("payload", {}), attachment_id, part_id
+    )
+    attachment_id = part.get("body", {}).get("attachmentId")
+    if not isinstance(attachment_id, str) or not attachment_id.strip():
+        raise UserInputError("Selected MIME part has no downloadable attachment.")
     expected_size = _size(part.get("body", {}).get("size"))
     name = file_name if file_name is not None else part.get("filename")
     if not isinstance(name, str) or not name.strip():

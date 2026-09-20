@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import re
+from copy import deepcopy
 from contextvars import ContextVar
 from unittest.mock import Mock
 
@@ -14,7 +15,7 @@ from gmail.attachment_transfer import (
     SOURCE_PROPERTY,
     save_attachment_to_drive,
 )
-from gmail.gmail_tools import save_gmail_attachment_to_drive
+from gmail.gmail_tools import get_gmail_message_content, save_gmail_attachment_to_drive
 from core.server import server
 from core.tool_registry import get_tool_components
 
@@ -296,13 +297,19 @@ async def test_different_accounts_do_not_share_duplicate_keys():
 def test_discovery_requires_both_services_and_advertises_mutation():
     tool = get_tool_components(server)[save_gmail_attachment_to_drive.__name__]
     props = tool.parameters["properties"]
-    assert {"message_id", "attachment_id", "folder_id", "file_name"} <= props.keys()
+    assert {
+        "message_id",
+        "attachment_id",
+        "folder_id",
+        "file_name",
+        "part_id",
+    } <= props.keys()
     assert (
         not {"gmail_service", "drive_service", "base64_content", "token"} & props.keys()
     )
-    assert {"message_id", "attachment_id", "folder_id"} <= set(
-        tool.parameters["required"]
-    )
+    assert {"message_id", "folder_id"} <= set(tool.parameters["required"])
+    assert "attachment_id" not in tool.parameters["required"]
+    assert "part_id" not in tool.parameters["required"]
     assert tool.annotations.readOnlyHint is False
     assert tool.annotations.idempotentHint is False
     assert set(tool.fn._required_google_scopes) == {
@@ -349,7 +356,7 @@ async def test_interleaved_authenticated_requests_use_their_own_services(monkeyp
         try:
             return await tool(
                 message_id="message-1",
-                attachment_id="attachment-1",
+                part_id="0.0",
                 folder_id="folder-1",
                 user_google_email="spoofed@example.com",
             )
@@ -408,3 +415,89 @@ async def test_verification_request_failure_keeps_recovery_id():
     with pytest.raises(UserInputError, match="verification failed.*created-1"):
         await transfer(gmail, drive)
     drive.files().create.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_part_id_survives_rotating_download_ids_and_retry():
+    gmail, drive, _, message, saved, uploads = services()
+    part = message["payload"]["parts"][0]["parts"][0]
+    part["body"]["attachmentId"] = "fresh-download-id"
+    first = await transfer(gmail, drive, part_id="0.0")
+    assert (
+        gmail.users().messages().attachments().get.call_args.kwargs["id"]
+        == "fresh-download-id"
+    )
+    part["body"]["attachmentId"] = "next-download-id"
+    second = await transfer(gmail, drive, part_id="0.0", attachment_id=None)
+    assert (
+        gmail.users().messages().attachments().get.call_args.kwargs["id"]
+        == "next-download-id"
+    )
+    assert first["status"] == "created"
+    assert second["status"] == "existing"
+    assert second["file_id"] == first["file_id"]
+    assert len(saved) == len(uploads) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["missing", "ambiguous", "not_attachment"])
+async def test_invalid_part_id_never_falls_back_to_download_id(change):
+    gmail, drive, _, message, _, _ = services()
+    part = message["payload"]["parts"][0]["parts"][0]
+    if change == "missing":
+        part["partId"] = "different-part"
+    elif change == "ambiguous":
+        message["payload"]["parts"].append(deepcopy(part))
+    else:
+        del part["body"]["attachmentId"]
+    gmail.users().messages().attachments().get().execute.reset_mock()
+    with pytest.raises(UserInputError):
+        await transfer(gmail, drive, part_id="0.0")
+    gmail.users().messages().attachments().get().execute.assert_not_called()
+    drive.files().create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_part_id_distinguishes_same_name_and_size_attachments():
+    gmail, drive, _, message, _, _ = services()
+    original = message["payload"]["parts"][0]["parts"][0]
+    other = deepcopy(original)
+    other["partId"] = "0.1"
+    other["body"]["attachmentId"] = "other-download-id"
+    message["payload"]["parts"][0]["parts"].append(other)
+    await transfer(gmail, drive, part_id="0.1")
+    assert (
+        gmail.users().messages().attachments().get.call_args.kwargs["id"]
+        == "other-download-id"
+    )
+
+
+@pytest.mark.asyncio
+async def test_root_attachment_can_have_empty_part_id():
+    gmail, drive, _, message, _, _ = services()
+    message["payload"] = message["payload"]["parts"][0]["parts"][0]
+    message["payload"]["partId"] = ""
+    result = await transfer(gmail, drive, part_id="", attachment_id=None)
+    assert result["status"] == "created"
+
+
+@pytest.mark.asyncio
+async def test_missing_selector_fails_before_provider_calls():
+    gmail, drive, _, _, _, _ = services()
+    drive.reset_mock()
+    with pytest.raises(UserInputError, match="part_id"):
+        await transfer(gmail, drive, attachment_id=None)
+    drive.files.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_message_read_exposes_stable_part_id_for_transfer():
+    gmail, _, _, _, _, _ = services()
+    fn = get_gmail_message_content
+    while hasattr(fn, "__wrapped__"):
+        fn = fn.__wrapped__
+    content = await fn(
+        service=gmail, user_google_email="owner@example.com", message_id="message-1"
+    )
+    assert "Part ID: 0.0 (use as part_id when saving to Drive)" in content
+    assert "Attachment ID: attachment-1" in content
