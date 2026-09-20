@@ -2978,3 +2978,55 @@ async def set_drive_file_permissions(
     output_parts.extend(["", f"View link: {file_metadata.get('webViewLink', 'N/A')}"])
 
     return "\n".join(output_parts)
+
+
+@server.tool(
+    title="Upload File to Drive",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("upload_file_to_drive", service_type="drive")
+@require_google_service("drive", "drive_file")
+async def upload_file_to_drive(
+    service,
+    user_google_email: str,
+    file_url: str,
+    folder_id: str,
+    file_name: str,
+    mime_type: str,
+    expected_size: int,
+    expected_sha256: str,
+) -> dict:
+    """Upload a processed binary file to Drive and verify its exact bytes (up to 25 MiB).
+
+    The client must publish its local/sandbox file at a short-lived HTTPS file_url
+    reachable by this server, and compute expected_size and expected_sha256 from
+    those bytes. A local path on the client is not a path on this MCP host.
+    Integrations should supply the URL and checksum privately, never through the
+    model. No Google bearer is sent to file_url. Private/internal hosts and unsafe
+    redirects are refused. Downloads are bounded and validated before creating a file.
+
+    folder_id must name a writable folder, including a shared-drive folder.
+    file_name is the final name; mime_type preserves binary bytes without native
+    Google conversion. A single existing file with that name, size and SHA-256
+    returns status existing; conflicting contents or ambiguous matches fail closed.
+    Sequential retries reuse the file. Concurrent uploads are not atomically deduplicated.
+    Returns status, file_id, link, name, MIME type, size and sha256_checksum only
+    after Drive metadata verification. On an uncertain outcome, inspect the given
+    file ID before retrying. Mark filing complete only after a verified receipt.
+    """
+    from gdrive.file_transfer import upload_file_from_url
+
+    return await upload_file_from_url(
+        service,
+        file_url,
+        folder_id,
+        file_name,
+        mime_type,
+        expected_size,
+        expected_sha256,
+    )

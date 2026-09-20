@@ -5,7 +5,7 @@ MCP tools for Google Drive file management, search, content retrieval, and permi
 ## Contents
 - Search & Browse: search_drive_files, list_drive_items
 - Content & Download: get_drive_file_content, get_drive_file_download_url
-- Create & Modify: create_drive_file, create_drive_folder, copy_drive_file, update_drive_file
+- Create & Modify: create_drive_file, create_drive_folder, copy_drive_file, update_drive_file, upload_file_to_drive
 - Permissions & Sharing: set_drive_file_permissions, manage_drive_access, get_drive_file_permissions, get_drive_shareable_link, check_drive_file_public_access
 - Import: import_to_google_doc
 - Tips
@@ -308,3 +308,9 @@ Imports a file (Markdown, DOCX, TXT, HTML, RTF, ODT) into Google Docs format wit
 **Batch sharing**: Use `manage_drive_access` with `action: "grant_batch"` and a `recipients` list to share with multiple people in one call.
 
 **Link sharing shortcut**: Use `set_drive_file_permissions` with `link_sharing` to quickly toggle "anyone with the link" access without dealing with permission IDs.
+
+### upload_file_to_drive
+
+Upload a processed binary file from a client workspace to Drive with a verified receipt. The MCP server cannot read the client's local filesystem. The client integration must publish the file at a short-lived HTTPS `file_url` and privately provide `expected_size` and `expected_sha256`; keep capabilities and file bytes out of model messages. Pass `folder_id`, `file_name`, and `mime_type` for the destination. The limit is 25 MiB; no Google-native conversion is performed.
+
+The server validates the source bytes before upload and verifies Drive's size and SHA-256 afterward. A single matching filename is reused; conflicting contents or multiple matches fail without overwrite. Sequential retries need no working source URL once a verified copy exists. Concurrent calls are not atomically deduplicated. Inspect any recovery file ID before retrying an uncertain upload.
