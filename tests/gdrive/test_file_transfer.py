@@ -3,7 +3,10 @@ from unittest.mock import Mock, AsyncMock
 
 import pytest
 
+from core.server import server
+from core.tool_registry import get_tool_components
 from core.utils import UserInputError
+from gdrive.drive_tools import upload_file_to_drive  # noqa: F401
 from gdrive.file_transfer import MAX_UPLOAD_BYTES, upload_file_from_url
 
 DATA = bytes(range(256)) * 32
@@ -204,10 +207,6 @@ async def test_verification_detects_drive_corruption(fixture):
 
 
 def test_schema_and_scope_are_registered():
-    from gdrive.drive_tools import upload_file_to_drive  # noqa: F401
-    from core.server import server
-    from core.tool_registry import get_tool_components
-
     tool = get_tool_components(server)["upload_file_to_drive"]
     assert tool.annotations.readOnlyHint is False
     assert tool.annotations.idempotentHint is False
