@@ -314,3 +314,112 @@ async def test_manage_event_rejects_invalid_send_updates(action):
             response="accepted",
             send_updates="invalid",
         )
+
+
+@pytest.mark.asyncio
+async def test_create_event_supports_attendee_objects():
+    """Issue #1145: attendee objects with metadata like responseStatus must be accepted on create."""
+    mock_service = _create_mock_service()
+    mock_service.events().insert().execute = Mock(
+        return_value={
+            "id": "evt123",
+            "htmlLink": "https://calendar.google.com/event?eid=evt123",
+            "summary": "Meeting",
+        }
+    )
+
+    attendee_objects = [
+        {"email": "organizer@example.com", "responseStatus": "accepted"},
+        {"email": "guest@example.com", "optional": True},
+    ]
+
+    await _create_event_impl(
+        service=mock_service,
+        user_google_email="user@example.com",
+        summary="Meeting",
+        start_time="2026-04-06T09:00:00Z",
+        end_time="2026-04-06T09:30:00Z",
+        attendees=attendee_objects,
+    )
+
+    call_args = mock_service.events().insert.call_args
+    body = call_args[1]["body"]
+    assert body["attendees"] == attendee_objects
+
+
+@pytest.mark.asyncio
+async def test_create_event_supports_mixed_attendees():
+    mock_service = _create_mock_service()
+    mock_service.events().insert().execute = Mock(
+        return_value={
+            "id": "evt123",
+            "htmlLink": "https://calendar.google.com/event?eid=evt123",
+            "summary": "Meeting",
+        }
+    )
+
+    await _create_event_impl(
+        service=mock_service,
+        user_google_email="user@example.com",
+        summary="Meeting",
+        start_time="2026-04-06T09:00:00Z",
+        end_time="2026-04-06T09:30:00Z",
+        attendees=[
+            "plain@example.com",
+            {"email": "object@example.com", "responseStatus": "accepted"},
+        ],
+    )
+
+    body = mock_service.events().insert.call_args[1]["body"]
+    assert body["attendees"] == [
+        {"email": "plain@example.com"},
+        {"email": "object@example.com", "responseStatus": "accepted"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_event_preserves_plain_string_attendees():
+    mock_service = _create_mock_service()
+    mock_service.events().insert().execute = Mock(
+        return_value={"id": "evt123", "htmlLink": "link", "summary": "Meeting"}
+    )
+
+    await _create_event_impl(
+        service=mock_service,
+        user_google_email="user@example.com",
+        summary="Meeting",
+        start_time="2026-04-06T09:00:00Z",
+        end_time="2026-04-06T09:30:00Z",
+        attendees=["alice@example.com", "bob@example.com"],
+    )
+
+    body = mock_service.events().insert.call_args[1]["body"]
+    assert body["attendees"] == [
+        {"email": "alice@example.com"},
+        {"email": "bob@example.com"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_manage_event_create_action_routes_attendee_objects():
+    """End-to-end manage_event(action='create') must preserve attendee objects."""
+    mock_service = _create_mock_service()
+    mock_service.events().insert().execute = Mock(
+        return_value={"id": "evt123", "htmlLink": "link", "summary": "Sync"}
+    )
+
+    fn = _unwrap(manage_event)
+    await fn(
+        service=mock_service,
+        user_google_email="user@example.com",
+        action="create",
+        summary="Sync",
+        start_time="2026-04-06T09:00:00Z",
+        end_time="2026-04-06T09:30:00Z",
+        attendees=[{"email": "lead@example.com", "responseStatus": "accepted"}],
+    )
+
+    body = mock_service.events().insert.call_args[1]["body"]
+    assert body["attendees"] == [
+        {"email": "lead@example.com", "responseStatus": "accepted"}
+    ]
