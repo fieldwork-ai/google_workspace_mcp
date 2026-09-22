@@ -160,9 +160,7 @@ async def create_form(
     if document_title:
         form_body["info"]["document_title"] = document_title
 
-    created_form = await greenlet_spawn(
-        service.forms().create(body=form_body).execute
-    )
+    created_form = await greenlet_spawn(service.forms().create(body=form_body).execute)
 
     form_id = created_form.get("formId")
     edit_url = f"https://docs.google.com/forms/d/{form_id}/edit"

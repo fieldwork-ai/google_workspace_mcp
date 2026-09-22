@@ -1908,9 +1908,7 @@ async def debug_table_structure(
     )
 
     # Get the document
-    doc = await greenlet_spawn(
-        service.documents().get(documentId=document_id).execute
-    )
+    doc = await greenlet_spawn(service.documents().get(documentId=document_id).execute)
 
     # Find tables
     tables = find_tables(doc)

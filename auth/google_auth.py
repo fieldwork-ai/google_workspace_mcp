@@ -97,7 +97,9 @@ def _build_authorized_http(
 ) -> google_auth_httplib2.AuthorizedHttp:
     """Return credentialed HTTP on the event-loop bridge, with an explicit
     socket timeout. Every call through it must be inside `greenlet_spawn`."""
-    return google_auth_httplib2.AuthorizedHttp(credentials, http=BridgeHttp(timeout=timeout))
+    return google_auth_httplib2.AuthorizedHttp(
+        credentials, http=BridgeHttp(timeout=timeout)
+    )
 
 
 # Session credentials now handled by OAuth21SessionStore - no local cache needed

@@ -51,9 +51,15 @@ def transport(monkeypatch):
                 "thread": threading.current_thread(),
             }
         )
-        return handlers.pop(0)(request) if handlers else httpx.Response(200, json={"ok": True})
+        return (
+            handlers.pop(0)(request)
+            if handlers
+            else httpx.Response(200, json={"ok": True})
+        )
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    )
     monkeypatch.setattr(async_bridge, "shared_client", lambda: client)
     return {"seen": seen, "handlers": handlers}
 
@@ -110,7 +116,11 @@ async def test_contextvars_are_visible_inside_the_frame():
 
 @pytest.mark.asyncio
 async def test_plain_request_stays_on_the_loop_thread_and_carries_the_bearer(transport):
-    request = HttpRequest(_authorized(), _json_postproc, "https://gmail.googleapis.com/gmail/v1/users/me/profile")
+    request = HttpRequest(
+        _authorized(),
+        _json_postproc,
+        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+    )
     result = await greenlet_spawn(request.execute)
     assert result == {"ok": True}
     [call] = transport["seen"]
@@ -123,7 +133,9 @@ async def test_media_download_reads_ranges_until_done(transport):
     body = b"0123456789"
 
     def chunk(request: httpx.Request) -> httpx.Response:
-        start, end = (int(x) for x in request.headers["range"].removeprefix("bytes=").split("-"))
+        start, end = (
+            int(x) for x in request.headers["range"].removeprefix("bytes=").split("-")
+        )
         end = min(end, len(body) - 1)
         return httpx.Response(
             206,
@@ -132,7 +144,11 @@ async def test_media_download_reads_ranges_until_done(transport):
         )
 
     transport["handlers"].extend([chunk, chunk, chunk])
-    request = HttpRequest(_authorized(), _json_postproc, "https://www.googleapis.com/drive/v3/files/x?alt=media")
+    request = HttpRequest(
+        _authorized(),
+        _json_postproc,
+        "https://www.googleapis.com/drive/v3/files/x?alt=media",
+    )
     sink = io.BytesIO()
     downloader = MediaIoBaseDownload(sink, request, chunksize=4)
 
@@ -151,7 +167,9 @@ async def test_resumable_upload_sees_308_resume_incomplete_itself(transport):
     payload = b"abcdefgh"
 
     def start(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"location": "https://upload.googleapis.com/session/1"})
+        return httpx.Response(
+            200, headers={"location": "https://upload.googleapis.com/session/1"}
+        )
 
     def first_chunk(request: httpx.Request) -> httpx.Response:
         assert request.method == "PUT"
@@ -163,7 +181,9 @@ async def test_resumable_upload_sees_308_resume_incomplete_itself(transport):
         return httpx.Response(200, json={"id": "uploaded"})
 
     transport["handlers"].extend([start, first_chunk, last_chunk])
-    media = MediaIoBaseUpload(io.BytesIO(payload), mimetype="text/plain", chunksize=4, resumable=True)
+    media = MediaIoBaseUpload(
+        io.BytesIO(payload), mimetype="text/plain", chunksize=4, resumable=True
+    )
     request = HttpRequest(
         _authorized(),
         _json_postproc,
@@ -203,7 +223,11 @@ async def test_batch_request_round_trips_multipart(transport):
                 f"{json.dumps(payload)}\r\n"
             )
         body = "".join(parts) + f"--{boundary}--\r\n"
-        return httpx.Response(200, content=body.encode(), headers={"content-type": f'multipart/mixed; boundary="{boundary}"'})
+        return httpx.Response(
+            200,
+            content=body.encode(),
+            headers={"content-type": f'multipart/mixed; boundary="{boundary}"'},
+        )
 
     transport["handlers"].append(batch_response)
     results: dict[str, dict] = {}
@@ -212,25 +236,45 @@ async def test_batch_request_round_trips_multipart(transport):
         assert exception is None
         results[request_id] = response
 
-    batch = BatchHttpRequest(callback=collect, batch_uri="https://www.googleapis.com/batch/gmail/v1")
+    batch = BatchHttpRequest(
+        callback=collect, batch_uri="https://www.googleapis.com/batch/gmail/v1"
+    )
     http = _authorized()
     for n in ("1", "2"):
-        batch.add(HttpRequest(http, _json_postproc, f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{n}"), request_id=n)
+        batch.add(
+            HttpRequest(
+                http,
+                _json_postproc,
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{n}",
+            ),
+            request_id=n,
+        )
     await greenlet_spawn(batch.execute)
     assert results == {"1": {"n": 1}, "2": {"n": 2}}
 
 
 @pytest.mark.asyncio
 async def test_get_redirects_are_followed_but_308_is_returned(transport):
-    transport["handlers"].append(lambda r: httpx.Response(302, headers={"location": "https://example.test/final"}))
+    transport["handlers"].append(
+        lambda r: httpx.Response(
+            302, headers={"location": "https://example.test/final"}
+        )
+    )
     transport["handlers"].append(lambda r: httpx.Response(200, json={"at": "final"}))
     request = HttpRequest(_authorized(), _json_postproc, "https://example.test/start")
     assert await greenlet_spawn(request.execute) == {"at": "final"}
-    assert [c["url"] for c in transport["seen"]] == ["https://example.test/start", "https://example.test/final"]
+    assert [c["url"] for c in transport["seen"]] == [
+        "https://example.test/start",
+        "https://example.test/final",
+    ]
 
     transport["seen"].clear()
-    transport["handlers"].append(lambda r: httpx.Response(308, headers={"range": "bytes=0-3"}))
-    response, _ = await greenlet_spawn(BridgeHttp().request, "https://upload.test/session", "PUT", b"data")
+    transport["handlers"].append(
+        lambda r: httpx.Response(308, headers={"range": "bytes=0-3"})
+    )
+    response, _ = await greenlet_spawn(
+        BridgeHttp().request, "https://upload.test/session", "PUT", b"data"
+    )
     assert response.status == 308
     assert response["range"] == "bytes=0-3"
     assert len(transport["seen"]) == 1

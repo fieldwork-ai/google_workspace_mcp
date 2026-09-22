@@ -347,9 +347,7 @@ async def _create_script_project_impl(
     if parent_id:
         request_body["parentId"] = parent_id
 
-    project = await greenlet_spawn(
-        service.projects().create(body=request_body).execute
-    )
+    project = await greenlet_spawn(service.projects().create(body=request_body).execute)
 
     script_id = project.get("scriptId", "Unknown")
     edit_url = f"https://script.google.com/d/{script_id}/edit"
@@ -867,9 +865,7 @@ async def _list_script_processes_impl(
     if script_id:
         request_params["scriptId"] = script_id
 
-    response = await greenlet_spawn(
-        service.processes().list(**request_params).execute
-    )
+    response = await greenlet_spawn(service.processes().list(**request_params).execute)
 
     processes = response.get("processes", [])
 

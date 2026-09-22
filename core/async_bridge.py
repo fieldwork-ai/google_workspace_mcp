@@ -163,9 +163,13 @@ async def _request(
         body = body.read()
     if isinstance(body, str):
         body = body.encode("utf-8")
-    request_timeout = httpx.Timeout(timeout) if timeout is not None else httpx.USE_CLIENT_DEFAULT
+    request_timeout = (
+        httpx.Timeout(timeout) if timeout is not None else httpx.USE_CLIENT_DEFAULT
+    )
     while True:
-        r = await client.request(method, uri, content=body, headers=request_headers, timeout=request_timeout)
+        r = await client.request(
+            method, uri, content=body, headers=request_headers, timeout=request_timeout
+        )
         location = r.headers.get("location")
         follow = (
             r.status_code in _FOLLOWED_REDIRECTS
@@ -199,4 +203,6 @@ class BridgeHttp:
         redirections: int = httplib2.DEFAULT_MAX_REDIRECTS,
         connection_type: Any = None,
     ) -> tuple[httplib2.Response, bytes]:
-        return await_only(_request(uri, method, body, headers, redirections, self.timeout))
+        return await_only(
+            _request(uri, method, body, headers, redirections, self.timeout)
+        )

@@ -120,34 +120,51 @@ class ExternalOAuthProvider(GoogleProvider):
         if token.startswith("ya29."):
             user_info = await self._fetch_userinfo(token)
             if not user_info or not user_info.get("email"):
-                logger.warning("bearer form=google-access-token refused: userinfo did not identify the account")
+                logger.warning(
+                    "bearer form=google-access-token refused: userinfo did not identify the account"
+                )
                 return None
-            logger.info("bearer form=google-access-token accepted for: %s", user_info["email"])
-            return self._access_token(token, email=user_info["email"], sub=user_info.get("id"))
+            logger.info(
+                "bearer form=google-access-token accepted for: %s", user_info["email"]
+            )
+            return self._access_token(
+                token, email=user_info["email"], sub=user_info.get("id")
+            )
 
         if looks_like_identity_claim(token):
             if not self._identity_claim_keys:
-                logger.warning("bearer form=identity-claim refused: no DATA_CLAIM_PUBLIC_KEYS configured")
+                logger.warning(
+                    "bearer form=identity-claim refused: no DATA_CLAIM_PUBLIC_KEYS configured"
+                )
                 return None
             claim = verify_identity_claim(token, self._identity_claim_keys)
             if not isinstance(claim, IdentityClaim):
                 logger.warning("bearer form=identity-claim refused: %s", claim.reason)
                 return None
             logger.info("bearer form=identity-claim accepted for: %s", claim.email)
-            return self._access_token(claim.token, email=claim.email, sub=claim.sub, expires_at=claim.exp)
+            return self._access_token(
+                claim.token, email=claim.email, sub=claim.sub, expires_at=claim.exp
+            )
 
         # For JWT tokens, use parent class implementation
         return await super().verify_token(token)
 
     def _access_token(
-        self, google_token: str, *, email: str, sub: Optional[str], expires_at: Optional[int] = None
+        self,
+        google_token: str,
+        *,
+        email: str,
+        sub: Optional[str],
+        expires_at: Optional[int] = None,
     ) -> WorkspaceAccessToken:
         """The one access-token shape every form produces; `token` is the
         Google access token the handlers call Google with."""
         return WorkspaceAccessToken(
             token=google_token,
             scopes=list(getattr(self, "required_scopes", []) or []),
-            expires_at=expires_at if expires_at is not None else int(time.time()) + get_session_time(),
+            expires_at=expires_at
+            if expires_at is not None
+            else int(time.time()) + get_session_time(),
             claims={"email": email, "sub": sub},
             client_id=self._client_id,
             email=email,
@@ -164,7 +181,10 @@ class ExternalOAuthProvider(GoogleProvider):
             logger.error("Error validating external access token: %s", exc)
             return None
         if response.status_code != 200:
-            logger.error("userinfo answered %s for an external access token", response.status_code)
+            logger.error(
+                "userinfo answered %s for an external access token",
+                response.status_code,
+            )
             return None
         try:
             return response.json()

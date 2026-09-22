@@ -3577,9 +3577,7 @@ async def list_gmail_labels(
     """
     logger.info(f"[list_gmail_labels] Invoked. Email: '{user_google_email}'")
 
-    response = await greenlet_spawn(
-        service.users().labels().list(userId="me").execute
-    )
+    response = await greenlet_spawn(service.users().labels().list(userId="me").execute)
     labels = response.get("labels", [])
 
     if not include_system:

@@ -712,7 +712,9 @@ def configure_server_for_http():
                 try:
                     identity_claim_keys = parse_public_keys(raw_keys)
                 except (ValueError, TypeError) as exc:
-                    raise RuntimeError(f"DATA_CLAIM_PUBLIC_KEYS is not parseable: {exc}") from exc
+                    raise RuntimeError(
+                        f"DATA_CLAIM_PUBLIC_KEYS is not parseable: {exc}"
+                    ) from exc
 
                 provider = ExternalOAuthProvider(
                     client_id=config.client_id,

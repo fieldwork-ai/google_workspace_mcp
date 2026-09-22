@@ -608,9 +608,7 @@ async def list_contacts(
     if sort_order:
         params["sortOrder"] = sort_order
 
-    result = await greenlet_spawn(
-        service.people().connections().list(**params).execute
-    )
+    result = await greenlet_spawn(service.people().connections().list(**params).execute)
 
     connections = result.get("connections", [])
     next_page_token = result.get("nextPageToken")
@@ -1512,9 +1510,7 @@ async def manage_contacts_batch(
 
     batch_body = {"resourceNames": resource_names}
 
-    await greenlet_spawn(
-        service.people().batchDeleteContacts(body=batch_body).execute
-    )
+    await greenlet_spawn(service.people().batchDeleteContacts(body=batch_body).execute)
 
     response = f"Batch deleted {len(contact_ids)} contacts for {user_google_email}."
     logger.info(f"Batch deleted {len(contact_ids)} contacts for {user_google_email}")
@@ -1577,9 +1573,7 @@ async def manage_contact_group(
 
         body = {"contactGroup": {"name": name}}
 
-        result = await greenlet_spawn(
-            service.contactGroups().create(body=body).execute
-        )
+        result = await greenlet_spawn(service.contactGroups().create(body=body).execute)
 
         resource_name = result.get("resourceName", "")
         created_group_id = resource_name.replace("contactGroups/", "")

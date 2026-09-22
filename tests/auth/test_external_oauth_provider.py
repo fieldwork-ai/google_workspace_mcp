@@ -14,7 +14,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from auth import external_oauth_provider as provider_module
 from auth.external_oauth_provider import ExternalOAuthProvider
-from auth.identity_claim import ClaimRefused, IdentityClaim, parse_public_keys, verify_identity_claim
+from auth.identity_claim import (
+    ClaimRefused,
+    IdentityClaim,
+    parse_public_keys,
+    verify_identity_claim,
+)
 
 
 def _b64url(data: bytes) -> str:
@@ -70,7 +75,11 @@ def test_claim_verifies_against_any_configured_key():
     for private in (old, new):
         claim = verify_identity_claim(_mint(private), keys)
         assert isinstance(claim, IdentityClaim)
-        assert (claim.token, claim.sub, claim.email) == ("ya29.inner", "1234567890", "user@example.test")
+        assert (claim.token, claim.sub, claim.email) == (
+            "ya29.inner",
+            "1234567890",
+            "user@example.test",
+        )
 
 
 @pytest.mark.parametrize(
@@ -96,7 +105,9 @@ def test_claim_refusals(mutate, reason):
 
 
 @pytest.mark.asyncio
-async def test_identity_claim_yields_the_google_token_and_identity_without_network(monkeypatch):
+async def test_identity_claim_yields_the_google_token_and_identity_without_network(
+    monkeypatch,
+):
     private, key_b64 = _keypair()
     provider = _provider(key_b64)
 
@@ -140,7 +151,10 @@ async def test_bare_google_token_takes_the_userinfo_path(monkeypatch):
     monkeypatch.setattr(provider_module, "shared_client", lambda: client)
     _, key_b64 = _keypair()
     access = await _provider(key_b64).verify_token("ya29.bare")
-    assert seen == {"url": provider_module.GOOGLE_USERINFO_URL, "auth": "Bearer ya29.bare"}
+    assert seen == {
+        "url": provider_module.GOOGLE_USERINFO_URL,
+        "auth": "Bearer ya29.bare",
+    }
     assert access is not None
     assert access.token == "ya29.bare"
     assert access.claims == {"email": "bare@example.test", "sub": "999"}
@@ -148,6 +162,10 @@ async def test_bare_google_token_takes_the_userinfo_path(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bare_google_token_google_rejects_is_refused(monkeypatch):
-    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(401, json={"error": "invalid_token"})))
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(401, json={"error": "invalid_token"})
+        )
+    )
     monkeypatch.setattr(provider_module, "shared_client", lambda: client)
     assert await _provider().verify_token("ya29.dead") is None

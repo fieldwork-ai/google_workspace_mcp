@@ -234,9 +234,7 @@ async def get_messages(
     logger.info(f"[get_messages] Space ID: '{space_id}' for user '{user_google_email}'")
 
     # Get space info first
-    space_info = await greenlet_spawn(
-        chat_service.spaces().get(name=space_id).execute
-    )
+    space_info = await greenlet_spawn(chat_service.spaces().get(name=space_id).execute)
     space_name = space_info.get("displayName", "Unknown Space")
 
     # Get messages
@@ -639,9 +637,7 @@ async def download_chat_attachment(
     )
 
     # Fetch the message to get attachment metadata
-    msg = await greenlet_spawn(
-        service.spaces().messages().get(name=message_id).execute
-    )
+    msg = await greenlet_spawn(service.spaces().messages().get(name=message_id).execute)
 
     attachments = msg.get("attachment", [])
     if not attachments:
