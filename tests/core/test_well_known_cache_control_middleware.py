@@ -345,6 +345,7 @@ def test_external_oauth_metadata_matches_mcp_resource_and_challenge(monkeypatch)
     monkeypatch.setenv("WORKSPACE_EXTERNAL_URL", "https://workspace.example.com")
     monkeypatch.setenv("EXTERNAL_OAUTH21_PROVIDER", "true")
     monkeypatch.setenv("WORKSPACE_MCP_STATELESS_MODE", "true")
+    monkeypatch.setenv("DATA_CLAIM_PUBLIC_KEYS", _claim_key_b64())
 
     import core.server as core_server
     from auth.oauth_config import reload_oauth_config
@@ -384,3 +385,15 @@ def test_external_oauth_metadata_matches_mcp_resource_and_challenge(monkeypatch)
         '.well-known/oauth-protected-resource/mcp"'
         in challenge.headers["www-authenticate"]
     )
+
+
+def _claim_key_b64() -> str:
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    spki = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return base64.b64encode(spki).decode("ascii")
