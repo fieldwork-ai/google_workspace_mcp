@@ -19,6 +19,7 @@ from mcp.types import ToolAnnotations
 from auth.service_decorator import require_google_service, require_multiple_services
 from core.server import server
 from core.utils import TransientNetworkError, handle_http_errors
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ async def _resolve_sender(people_service, sender_obj: dict) -> str:
     people_resource = user_id.replace("users/", "people/", 1)
     if people_service:
         try:
-            person = await asyncio.to_thread(
+            person = await greenlet_spawn(
                 people_service.people()
                 .get(resourceName=people_resource, personFields="names,emailAddresses")
                 .execute
@@ -100,9 +101,9 @@ async def _execute_chat_request(
     for attempt in range(retries):
         try:
             if semaphore is None:
-                return await asyncio.to_thread(lambda: request_factory().execute())
+                return await greenlet_spawn(lambda: request_factory().execute())
             async with semaphore:
-                return await asyncio.to_thread(lambda: request_factory().execute())
+                return await greenlet_spawn(lambda: request_factory().execute())
         except ssl.SSLError as e:
             if attempt == retries - 1:
                 raise
@@ -171,7 +172,7 @@ async def list_spaces(
     if filter_param:
         request_params["filter"] = filter_param
 
-    response = await asyncio.to_thread(service.spaces().list(**request_params).execute)
+    response = await greenlet_spawn(service.spaces().list(**request_params).execute)
 
     spaces = response.get("spaces", [])
     if not spaces:
@@ -233,7 +234,7 @@ async def get_messages(
     logger.info(f"[get_messages] Space ID: '{space_id}' for user '{user_google_email}'")
 
     # Get space info first
-    space_info = await asyncio.to_thread(
+    space_info = await greenlet_spawn(
         chat_service.spaces().get(name=space_id).execute
     )
     space_name = space_info.get("displayName", "Unknown Space")
@@ -242,7 +243,7 @@ async def get_messages(
     list_params = {"parent": space_id, "pageSize": page_size, "orderBy": order_by}
     if message_filter is not None:
         list_params["filter"] = message_filter
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         chat_service.spaces().messages().list(**list_params).execute
     )
 
@@ -354,7 +355,7 @@ async def send_message(
         message_body["thread"] = {"threadKey": thread_key}
         request_params["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
-    message = await asyncio.to_thread(
+    message = await greenlet_spawn(
         service.spaces().messages().create(**request_params).execute
     )
 
@@ -588,7 +589,7 @@ async def create_reaction(
     """
     logger.info(f"[create_reaction] Message: '{message_id}', Emoji: '{emoji_unicode}'")
 
-    reaction = await asyncio.to_thread(
+    reaction = await greenlet_spawn(
         service.spaces()
         .messages()
         .reactions()
@@ -638,7 +639,7 @@ async def download_chat_attachment(
     )
 
     # Fetch the message to get attachment metadata
-    msg = await asyncio.to_thread(
+    msg = await greenlet_spawn(
         service.spaces().messages().get(name=message_id).execute
     )
 

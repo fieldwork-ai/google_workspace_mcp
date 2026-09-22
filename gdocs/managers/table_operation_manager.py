@@ -6,7 +6,6 @@ multiple Google Docs API calls for complex table manipulations.
 """
 
 import logging
-import asyncio
 from typing import List, Dict, Any, Tuple, Optional
 
 from gdocs.docs_helpers import (
@@ -16,6 +15,7 @@ from gdocs.docs_helpers import (
 )
 from gdocs.docs_structure import find_tables
 from gdocs.docs_tables import validate_table_data
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +164,7 @@ class TableOperationManager:
         """Create an empty table at the specified index."""
         logger.debug(f"Creating {rows}x{cols} table at index {index}")
 
-        await asyncio.to_thread(
+        await greenlet_spawn(
             self.service.documents()
             .batchUpdate(
                 documentId=document_id,
@@ -179,7 +179,7 @@ class TableOperationManager:
         self, document_id: str, tab_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Get fresh document structure and extract table information."""
-        doc = await asyncio.to_thread(
+        doc = await greenlet_spawn(
             self.service.documents()
             .get(documentId=document_id, includeTabsContent=True)
             .execute
@@ -351,7 +351,7 @@ class TableOperationManager:
         )
 
         # Execute all insertions in a single batchUpdate
-        await asyncio.to_thread(
+        await greenlet_spawn(
             self.service.documents()
             .batchUpdate(
                 documentId=document_id,
@@ -472,7 +472,7 @@ class TableOperationManager:
             population_count += 1
 
         if requests:
-            await asyncio.to_thread(
+            await greenlet_spawn(
                 self.service.documents()
                 .batchUpdate(
                     documentId=document_id,

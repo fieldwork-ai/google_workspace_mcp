@@ -70,6 +70,7 @@ from gdocs.managers import (
     BatchOperationManager,
 )
 import json
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 HEADER_FOOTER_RUNTIME_CANARY = "docs-hf-canary-20260328b"
@@ -103,7 +104,7 @@ async def search_docs(
 
     escaped_query = query.replace("'", "\\'")
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.files()
         .list(
             q=f"name contains '{escaped_query}' and mimeType='application/vnd.google-apps.document' and trashed=false",
@@ -177,7 +178,7 @@ async def get_doc_content(
         f"[get_doc_content] Invoked. Document/File ID: '{document_id}' for user '{user_google_email}'"
     )
 
-    file_metadata = await asyncio.to_thread(
+    file_metadata = await greenlet_spawn(
         drive_service.files()
         .get(
             fileId=document_id,
@@ -198,7 +199,7 @@ async def get_doc_content(
 
     if mime_type == "application/vnd.google-apps.document":
         logger.info("[get_doc_content] Processing as native Google Doc.")
-        doc_data = await asyncio.to_thread(
+        doc_data = await greenlet_spawn(
             docs_service.documents()
             .get(
                 documentId=document_id,
@@ -354,7 +355,7 @@ async def list_docs_in_folder(
         f"[list_docs_in_folder] Invoked. Email: '{user_google_email}', Folder ID: '{folder_id}'"
     )
 
-    rsp = await asyncio.to_thread(
+    rsp = await greenlet_spawn(
         service.files()
         .list(
             q=f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false",
@@ -416,13 +417,13 @@ async def create_doc(
         f"[create_doc] Invoked. Email: '{user_google_email}', title_len={len(title)}"
     )
 
-    doc = await asyncio.to_thread(
+    doc = await greenlet_spawn(
         service.documents().create(body={"title": title}).execute
     )
     doc_id = doc.get("documentId")
     if content:
         requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.documents()
             .batchUpdate(documentId=doc_id, body={"requests": requests})
             .execute
@@ -713,7 +714,7 @@ async def modify_doc_text(
         )
 
     try:
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.documents()
             .batchUpdate(documentId=document_id, body={"requests": requests})
             .execute
@@ -779,7 +780,7 @@ async def find_and_replace_doc(
         create_find_replace_request(find_text, replace_text, match_case, tab_id)
     ]
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.documents()
         .batchUpdate(documentId=document_id, body={"requests": requests})
         .execute
@@ -876,7 +877,7 @@ async def insert_doc_elements(
     else:
         return f"Error: Unsupported element type '{element_type}'. Supported types: 'table', 'list', 'page_break'."
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.documents()
         .batchUpdate(documentId=document_id, body={"requests": requests})
         .execute
@@ -948,7 +949,7 @@ async def insert_doc_image(
     if is_drive_file:
         # Verify Drive file exists and get metadata
         try:
-            file_metadata = await asyncio.to_thread(
+            file_metadata = await greenlet_spawn(
                 drive_service.files()
                 .get(
                     fileId=image_source,
@@ -972,7 +973,7 @@ async def insert_doc_image(
     # Use helper to create image request
     requests = [create_insert_image_request(index, image_uri, width, height)]
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         docs_service.documents()
         .batchUpdate(documentId=document_id, body={"requests": requests})
         .execute
@@ -1417,7 +1418,7 @@ async def inspect_doc_structure(
     )
 
     # Get the document
-    doc = await asyncio.to_thread(
+    doc = await greenlet_spawn(
         service.documents().get(documentId=document_id, includeTabsContent=True).execute
     )
 
@@ -1907,7 +1908,7 @@ async def debug_table_structure(
     )
 
     # Get the document
-    doc = await asyncio.to_thread(
+    doc = await greenlet_spawn(
         service.documents().get(documentId=document_id).execute
     )
 
@@ -1979,7 +1980,7 @@ async def export_doc_to_pdf(
 
     # Get file metadata first to validate it's a Google Doc
     try:
-        file_metadata = await asyncio.to_thread(
+        file_metadata = await greenlet_spawn(
             service.files()
             .get(
                 fileId=document_id,
@@ -2012,7 +2013,7 @@ async def export_doc_to_pdf(
 
         done = False
         while not done:
-            _, done = await asyncio.to_thread(downloader.next_chunk)
+            _, done = await greenlet_spawn(downloader.next_chunk)
 
         pdf_content = fh.getvalue()
         pdf_size = len(pdf_content)
@@ -2041,7 +2042,7 @@ async def export_doc_to_pdf(
             file_metadata["parents"] = [folder_id]
 
         # Upload the file
-        uploaded_file = await asyncio.to_thread(
+        uploaded_file = await greenlet_spawn(
             service.files()
             .create(
                 body=file_metadata,
@@ -2084,7 +2085,7 @@ async def _get_paragraph_start_indices_in_range(
     """
     Fetch paragraph start indices that overlap a target range.
     """
-    doc_data = await asyncio.to_thread(
+    doc_data = await greenlet_spawn(
         service.documents()
         .get(
             documentId=document_id,
@@ -2369,7 +2370,7 @@ async def update_paragraph_style(
     if not requests:
         return f"No paragraph style changes or list creation specified for document {document_id}"
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.documents()
         .batchUpdate(documentId=document_id, body={"requests": requests})
         .execute
@@ -2500,7 +2501,7 @@ async def get_doc_as_markdown(
     # Fetch document content via Docs API (includeTabsContent for multi-tab docs)
     try:
         doc = await asyncio.wait_for(
-            asyncio.to_thread(
+            greenlet_spawn(
                 docs_service.documents()
                 .get(
                     documentId=document_id,
@@ -2527,7 +2528,7 @@ async def get_doc_as_markdown(
     page_token = None
 
     while True:
-        response = await asyncio.to_thread(
+        response = await greenlet_spawn(
             drive_service.comments()
             .list(
                 fileId=document_id,
@@ -2684,7 +2685,7 @@ async def manage_doc_tab(
             raise UserInputError("'index' is required for the 'create' action.")
 
         request = create_insert_doc_tab_request(title, index, parent_tab_id)
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.documents()
             .batchUpdate(documentId=document_id, body={"requests": [request]})
             .execute
@@ -2719,7 +2720,7 @@ async def manage_doc_tab(
             raise UserInputError("'tab_id' is required for the 'delete' action.")
 
         request = create_delete_doc_tab_request(tab_id)
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.documents()
             .batchUpdate(documentId=document_id, body={"requests": [request]})
             .execute
@@ -2740,7 +2741,7 @@ async def manage_doc_tab(
             raise UserInputError("'title' is required for the 'rename' action.")
 
         request = create_update_doc_tab_request(tab_id, title)
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.documents()
             .batchUpdate(documentId=document_id, body={"requests": [request]})
             .execute
@@ -2766,7 +2767,7 @@ async def manage_doc_tab(
 
     all_requests: List[dict] = []
 
-    doc = await asyncio.to_thread(
+    doc = await greenlet_spawn(
         service.documents().get(documentId=document_id, includeTabsContent=True).execute
     )
     try:
@@ -2815,7 +2816,7 @@ async def manage_doc_tab(
             "link": link,
         }
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.documents()
         .batchUpdate(documentId=document_id, body={"requests": all_requests})
         .execute

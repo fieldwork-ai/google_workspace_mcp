@@ -14,6 +14,7 @@ from mcp.types import ToolAnnotations
 from auth.service_decorator import require_google_service
 from core.server import server
 from core.utils import ObjectList, UserInputError, handle_http_errors
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ async def _list_script_projects_impl(
     if page_token:
         request_params["pageToken"] = page_token
 
-    response = await asyncio.to_thread(service.files().list(**request_params).execute)
+    response = await greenlet_spawn(service.files().list(**request_params).execute)
 
     files = response.get("files", [])
 
@@ -196,8 +197,8 @@ async def _get_script_project_impl(
 
     # Get project metadata and content concurrently (independent requests)
     project, content = await asyncio.gather(
-        asyncio.to_thread(service.projects().get(scriptId=script_id).execute),
-        asyncio.to_thread(service.projects().getContent(scriptId=script_id).execute),
+        greenlet_spawn(service.projects().get(scriptId=script_id).execute),
+        greenlet_spawn(service.projects().getContent(scriptId=script_id).execute),
     )
 
     title = project.get("title", "Untitled")
@@ -272,7 +273,7 @@ async def _get_script_content_impl(
     )
 
     # Must use getContent() to retrieve files, not get() which only returns metadata
-    content = await asyncio.to_thread(
+    content = await greenlet_spawn(
         service.projects().getContent(scriptId=script_id).execute
     )
 
@@ -346,7 +347,7 @@ async def _create_script_project_impl(
     if parent_id:
         request_body["parentId"] = parent_id
 
-    project = await asyncio.to_thread(
+    project = await greenlet_spawn(
         service.projects().create(body=request_body).execute
     )
 
@@ -414,7 +415,7 @@ async def _update_script_content_impl(
 
     async with _get_script_update_lock(script_id):
         if merge:
-            current_content = await asyncio.to_thread(
+            current_content = await greenlet_spawn(
                 service.projects().getContent(scriptId=script_id).execute
             )
             files_to_push = _merge_script_files(
@@ -423,7 +424,7 @@ async def _update_script_content_impl(
 
         request_body = {"files": files_to_push}
 
-        updated_content = await asyncio.to_thread(
+        updated_content = await greenlet_spawn(
             service.projects()
             .updateContent(scriptId=script_id, body=request_body)
             .execute
@@ -508,7 +509,7 @@ async def _run_script_function_impl(
         request_body["parameters"] = parameters
 
     try:
-        response = await asyncio.to_thread(
+        response = await greenlet_spawn(
             service.scripts().run(scriptId=script_id, body=request_body).execute
         )
 
@@ -589,7 +590,7 @@ async def _create_deployment_impl(
 
     # First, create a new version
     version_body = {"description": version_description or description}
-    version = await asyncio.to_thread(
+    version = await greenlet_spawn(
         service.projects()
         .versions()
         .create(scriptId=script_id, body=version_body)
@@ -604,7 +605,7 @@ async def _create_deployment_impl(
         "description": description,
     }
 
-    deployment = await asyncio.to_thread(
+    deployment = await greenlet_spawn(
         service.projects()
         .deployments()
         .create(scriptId=script_id, body=deployment_body)
@@ -706,7 +707,7 @@ async def _list_deployments_impl(
     """Internal implementation for list_deployments."""
     logger.info(f"[list_deployments] Email: {user_google_email}, ID: {script_id}")
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.projects().deployments().list(scriptId=script_id).execute
     )
 
@@ -803,7 +804,7 @@ async def _update_deployment_impl(
 
     request_body = {"deploymentConfig": deployment_config}
 
-    deployment = await asyncio.to_thread(
+    deployment = await greenlet_spawn(
         service.projects()
         .deployments()
         .update(scriptId=script_id, deploymentId=deployment_id, body=request_body)
@@ -838,7 +839,7 @@ async def _delete_deployment_impl(
         f"[delete_deployment] Email: {user_google_email}, Script: {script_id}, Deployment: {deployment_id}"
     )
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.projects()
         .deployments()
         .delete(scriptId=script_id, deploymentId=deployment_id)
@@ -866,7 +867,7 @@ async def _list_script_processes_impl(
     if script_id:
         request_params["scriptId"] = script_id
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.processes().list(**request_params).execute
     )
 
@@ -943,7 +944,7 @@ async def _delete_script_project_impl(
     )
 
     # Apps Script projects are stored as Drive files
-    await asyncio.to_thread(service.files().delete(fileId=script_id).execute)
+    await greenlet_spawn(service.files().delete(fileId=script_id).execute)
 
     logger.info(f"[delete_script_project] Deleted script {script_id}")
     return f"Deleted Apps Script project: {script_id}"
@@ -994,7 +995,7 @@ async def _list_versions_impl(
     """Internal implementation for list_versions."""
     logger.info(f"[list_versions] Email: {user_google_email}, ScriptID: {script_id}")
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.projects().versions().list(scriptId=script_id).execute
     )
 
@@ -1064,7 +1065,7 @@ async def _create_version_impl(
     if description:
         request_body["description"] = description
 
-    version = await asyncio.to_thread(
+    version = await greenlet_spawn(
         service.projects()
         .versions()
         .create(scriptId=script_id, body=request_body)
@@ -1132,7 +1133,7 @@ async def _get_version_impl(
         f"[get_version] Email: {user_google_email}, ScriptID: {script_id}, Version: {version_number}"
     )
 
-    version = await asyncio.to_thread(
+    version = await greenlet_spawn(
         service.projects()
         .versions()
         .get(scriptId=script_id, versionNumber=version_number)
@@ -1208,7 +1209,7 @@ async def _get_script_metrics_impl(
         "metricsGranularity": metrics_granularity,
     }
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.projects().getMetrics(**request_params).execute
     )
 

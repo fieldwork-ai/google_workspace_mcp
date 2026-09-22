@@ -4,7 +4,6 @@ Google Tasks MCP Tools
 This module provides MCP tools for interacting with Google Tasks API.
 """
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -19,6 +18,7 @@ from mcp.types import ToolAnnotations
 from auth.service_decorator import require_google_service
 from core.server import server
 from core.utils import UserInputError, handle_http_errors
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ async def list_task_lists(
         if page_token:
             params["pageToken"] = page_token
 
-        result = await asyncio.to_thread(service.tasklists().list(**params).execute)
+        result = await greenlet_spawn(service.tasklists().list(**params).execute)
 
         task_lists = result.get("items", [])
         next_page_token = result.get("nextPageToken")
@@ -208,7 +208,7 @@ async def get_task_list(
     )
 
     try:
-        task_list = await asyncio.to_thread(
+        task_list = await greenlet_spawn(
             service.tasklists().get(tasklist=task_list_id).execute
         )
 
@@ -244,7 +244,7 @@ async def _create_task_list_impl(
 
     body = {"title": title}
 
-    result = await asyncio.to_thread(service.tasklists().insert(body=body).execute)
+    result = await greenlet_spawn(service.tasklists().insert(body=body).execute)
 
     response = f"""Task List Created for {user_google_email}:
 - Title: {result["title"]}
@@ -266,7 +266,7 @@ async def _update_task_list_impl(
 
     body = {"id": task_list_id, "title": title}
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.tasklists().update(tasklist=task_list_id, body=body).execute
     )
 
@@ -287,7 +287,7 @@ async def _delete_task_list_impl(
         f"[delete_task_list] Invoked. Email: '{user_google_email}', Task List ID: {task_list_id}"
     )
 
-    await asyncio.to_thread(service.tasklists().delete(tasklist=task_list_id).execute)
+    await greenlet_spawn(service.tasklists().delete(tasklist=task_list_id).execute)
 
     response = f"Task list {task_list_id} has been deleted for {user_google_email}. All tasks in this list have also been deleted."
 
@@ -303,7 +303,7 @@ async def _clear_completed_tasks_impl(
         f"[clear_completed_tasks] Invoked. Email: '{user_google_email}', Task List ID: {task_list_id}"
     )
 
-    await asyncio.to_thread(service.tasks().clear(tasklist=task_list_id).execute)
+    await greenlet_spawn(service.tasks().clear(tasklist=task_list_id).execute)
 
     response = f"All completed tasks have been cleared from task list {task_list_id} for {user_google_email}. The tasks are now hidden and won't appear in default task list views."
 
@@ -475,7 +475,7 @@ async def list_tasks(
         if updated_min:
             params["updatedMin"] = updated_min
 
-        result = await asyncio.to_thread(service.tasks().list(**params).execute)
+        result = await greenlet_spawn(service.tasks().list(**params).execute)
 
         tasks = result.get("items", [])
         next_page_token = result.get("nextPageToken")
@@ -491,7 +491,7 @@ async def list_tasks(
         while results_remaining > 0 and next_page_token:
             params["pageToken"] = next_page_token
             params["maxResults"] = str(results_remaining)
-            result = await asyncio.to_thread(service.tasks().list(**params).execute)
+            result = await greenlet_spawn(service.tasks().list(**params).execute)
             more_tasks = result.get("items", [])
             next_page_token = result.get("nextPageToken")
             if len(more_tasks) == 0:
@@ -673,7 +673,7 @@ async def get_task(
     )
 
     try:
-        task = await asyncio.to_thread(
+        task = await greenlet_spawn(
             service.tasks().get(tasklist=task_list_id, task=task_id).execute
         )
 
@@ -741,7 +741,7 @@ async def _create_task_impl(
     if previous:
         params["previous"] = previous
 
-    result = await asyncio.to_thread(service.tasks().insert(**params).execute)
+    result = await greenlet_spawn(service.tasks().insert(**params).execute)
 
     response = f"""Task Created for {user_google_email}:
 - Title: {result["title"]}
@@ -776,7 +776,7 @@ async def _update_task_impl(
     )
 
     # First get the current task to build the update body
-    current_task = await asyncio.to_thread(
+    current_task = await greenlet_spawn(
         service.tasks().get(tasklist=task_list_id, task=task_id).execute
     )
 
@@ -798,7 +798,7 @@ async def _update_task_impl(
     elif current_task.get("due"):
         body["due"] = current_task["due"]
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.tasks().update(tasklist=task_list_id, task=task_id, body=body).execute
     )
 
@@ -827,7 +827,7 @@ async def _delete_task_impl(
         f"[delete_task] Invoked. Email: '{user_google_email}', Task List ID: {task_list_id}, Task ID: {task_id}"
     )
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.tasks().delete(tasklist=task_list_id, task=task_id).execute
     )
 
@@ -859,7 +859,7 @@ async def _move_task_impl(
     if destination_task_list:
         params["destinationTasklist"] = destination_task_list
 
-    result = await asyncio.to_thread(service.tasks().move(**params).execute)
+    result = await greenlet_spawn(service.tasks().move(**params).execute)
 
     response = f"""Task Moved for {user_google_email}:
 - Title: {result["title"]}

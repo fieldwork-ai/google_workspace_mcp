@@ -5,7 +5,6 @@ This module provides MCP tools for interacting with Google Slides API.
 """
 
 import logging
-import asyncio
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from mcp.types import ToolAnnotations
@@ -18,6 +17,7 @@ from gslides.slides_helpers import (
     validate_batch_update_requests,
     validate_insert_text_targets,
 )
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ async def create_presentation(
 
     body = {"title": title}
 
-    result = await asyncio.to_thread(service.presentations().create(body=body).execute)
+    result = await greenlet_spawn(service.presentations().create(body=body).execute)
 
     presentation_id = result.get("presentationId")
     presentation_url = f"https://docs.google.com/presentation/d/{presentation_id}/edit"
@@ -261,7 +261,7 @@ async def get_presentation(
         f"[get_presentation] Invoked. Email: '{user_google_email}', ID: '{presentation_id}', Notes: {include_speaker_notes}"
     )
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.presentations().get(presentationId=presentation_id).execute
     )
 
@@ -372,7 +372,7 @@ async def batch_update_presentation(
 
     body = {"requests": requests}
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.presentations()
         .batchUpdate(presentationId=presentation_id, body=body)
         .execute
@@ -435,7 +435,7 @@ async def get_page(
         f"[get_page] Invoked. Email: '{user_google_email}', Presentation: '{presentation_id}', Page: '{page_object_id}'"
     )
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.presentations()
         .pages()
         .get(presentationId=presentation_id, pageObjectId=page_object_id)
@@ -499,7 +499,7 @@ async def get_page_thumbnail(
         f"[get_page_thumbnail] Invoked. Email: '{user_google_email}', Presentation: '{presentation_id}', Page: '{page_object_id}', Size: '{thumbnail_size}'"
     )
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.presentations()
         .pages()
         .getThumbnail(

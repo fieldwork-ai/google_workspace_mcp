@@ -28,6 +28,7 @@ from core.http_utils import (
     ssrf_safe_stream as _ssrf_safe_stream,
 )
 from core.utils import validate_file_path
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -455,7 +456,7 @@ async def resolve_drive_item(
         fields = f"{fields}, {extra_fields}"
 
     while True:
-        metadata = await asyncio.to_thread(
+        metadata = await greenlet_spawn(
             service.files()
             .get(fileId=current_id, fields=fields, supportsAllDrives=True)
             .execute

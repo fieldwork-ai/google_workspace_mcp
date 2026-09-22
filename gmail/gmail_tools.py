@@ -73,6 +73,7 @@ from gmail.gmail_helpers import (
     html_to_text_preserving_breaks,
 )
 from gmail.attachment_transfer import save_attachment_to_drive
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +382,7 @@ async def _export_full_message(
     notes: List[str] = []
 
     if body_format == "raw":
-        message_raw = await asyncio.to_thread(
+        message_raw = await greenlet_spawn(
             service.users()
             .messages()
             .get(userId="me", id=message_id, format="raw")
@@ -398,7 +399,7 @@ async def _export_full_message(
         mime_type = "message/rfc822"
         extension = ".eml"
     else:
-        message_full = await asyncio.to_thread(
+        message_full = await greenlet_spawn(
             service.users()
             .messages()
             .get(userId="me", id=message_id, format="full")
@@ -865,7 +866,7 @@ async def _fetch_thread_reply_context(
             request_kwargs["metadataHeaders"] = header_names
 
         request = service.users().threads().get(**request_kwargs)
-        thread = await asyncio.to_thread(request.execute)
+        thread = await greenlet_spawn(request.execute)
     except Exception as e:
         logger.warning(f"Failed to fetch reply context for thread {thread_id}: {e}")
         return None
@@ -1434,7 +1435,7 @@ async def _fetch_search_result_headers(
                     ),
                     request_id=mid,
                 )
-            await asyncio.to_thread(batch.execute)
+            await greenlet_spawn(batch.execute)
         except Exception as batch_error:
             logger.warning(
                 f"[search_gmail_messages] Batch metadata fetch failed, falling back to sequential processing: {batch_error}"
@@ -1643,7 +1644,7 @@ async def search_gmail_messages(
         request_params["pageToken"] = page_token
         logger.info("[search_gmail_messages] Using page_token for pagination")
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.users().messages().list(**request_params).execute
     )
 
@@ -1768,7 +1769,7 @@ async def get_gmail_message_content(
     )
 
     # Fetch message metadata first to get headers
-    message_metadata = await asyncio.to_thread(
+    message_metadata = await greenlet_spawn(
         service.users()
         .messages()
         .get(
@@ -1790,7 +1791,7 @@ async def get_gmail_message_content(
 
     # Handle raw format separately - fetch with format="raw" and return decoded MIME
     if body_format == "raw":
-        message_raw = await asyncio.to_thread(
+        message_raw = await greenlet_spawn(
             service.users()
             .messages()
             .get(userId="me", id=message_id, format="raw")
@@ -1803,7 +1804,7 @@ async def get_gmail_message_content(
         return "\n".join(content_lines)
 
     # Now fetch the full message to get the body parts
-    message_full = await asyncio.to_thread(
+    message_full = await greenlet_spawn(
         service.users()
         .messages()
         .get(
@@ -1925,7 +1926,7 @@ async def get_gmail_messages_content_batch(
                 batch.add(req, request_id=mid)
 
             # Execute batch request
-            await asyncio.to_thread(batch.execute)
+            await greenlet_spawn(batch.execute)
             batch_completed = True
 
         except Exception as batch_error:
@@ -2120,7 +2121,7 @@ async def get_gmail_attachment_content(
     # Download attachment content first, then optionally re-fetch message metadata
     # to resolve filename and MIME type for the saved file.
     try:
-        attachment = await asyncio.to_thread(
+        attachment = await greenlet_spawn(
             service.users()
             .messages()
             .attachments()
@@ -2173,7 +2174,7 @@ async def get_gmail_attachment_content(
         filename = None
         mime_type = None
         try:
-            message_full = await asyncio.to_thread(
+            message_full = await greenlet_spawn(
                 service.users()
                 .messages()
                 .get(
@@ -2734,7 +2735,7 @@ async def send_gmail_message(
         send_body["threadId"] = thread_id_final
 
     # Send the message
-    sent_message = await asyncio.to_thread(
+    sent_message = await greenlet_spawn(
         service.users().messages().send(userId="me", body=send_body).execute,
         num_retries=GOOGLE_API_WRITE_RETRIES,
     )
@@ -2769,7 +2770,7 @@ async def _forward_gmail_message_impl(
     the auto-derived 'Fwd: <original subject>'.
     """
     # Fetch the original message with full payload
-    original_message = await asyncio.to_thread(
+    original_message = await greenlet_spawn(
         service.users()
         .messages()
         .get(userId="me", id=message_id, format="full")
@@ -2794,7 +2795,7 @@ async def _forward_gmail_message_impl(
         for att in attachment_metadata:
             try:
                 # Download attachment content
-                attachment_data = await asyncio.to_thread(
+                attachment_data = await greenlet_spawn(
                     service.users()
                     .messages()
                     .attachments()
@@ -2858,7 +2859,7 @@ async def _forward_gmail_message_impl(
     send_body = {"raw": raw_message}
 
     # Send the message
-    sent_message = await asyncio.to_thread(
+    sent_message = await greenlet_spawn(
         service.users().messages().send(userId="me", body=send_body).execute,
         num_retries=GOOGLE_API_WRITE_RETRIES,
     )
@@ -3146,7 +3147,7 @@ async def draft_gmail_message(
         draft_body["message"]["threadId"] = thread_id
 
     # Create the draft
-    created_draft = await asyncio.to_thread(
+    created_draft = await greenlet_spawn(
         service.users().drafts().create(userId="me", body=draft_body).execute,
         num_retries=GOOGLE_API_WRITE_RETRIES,
     )
@@ -3356,7 +3357,7 @@ async def get_gmail_thread_content(
     )
 
     # Fetch the complete thread with all messages
-    thread_response = await asyncio.to_thread(
+    thread_response = await greenlet_spawn(
         service.users().threads().get(userId="me", id=thread_id, format="full").execute
     )
 
@@ -3458,7 +3459,7 @@ async def get_gmail_threads_content_batch(
                 batch.add(req, request_id=tid)
 
             # Execute batch request
-            await asyncio.to_thread(batch.execute)
+            await greenlet_spawn(batch.execute)
             batch_completed = True
 
         except Exception as batch_error:
@@ -3576,7 +3577,7 @@ async def list_gmail_labels(
     """
     logger.info(f"[list_gmail_labels] Invoked. Email: '{user_google_email}'")
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.users().labels().list(userId="me").execute
     )
     labels = response.get("labels", [])
@@ -3682,13 +3683,13 @@ async def manage_gmail_label(
             "labelListVisibility": label_list_visibility,
             "messageListVisibility": message_list_visibility,
         }
-        created_label = await asyncio.to_thread(
+        created_label = await greenlet_spawn(
             service.users().labels().create(userId="me", body=label_object).execute
         )
         return f"Label created successfully!\nName: {created_label['name']}\nID: {created_label['id']}"
 
     elif action == "update":
-        current_label = await asyncio.to_thread(
+        current_label = await greenlet_spawn(
             service.users().labels().get(userId="me", id=label_id).execute
         )
 
@@ -3699,7 +3700,7 @@ async def manage_gmail_label(
             "messageListVisibility": message_list_visibility,
         }
 
-        updated_label = await asyncio.to_thread(
+        updated_label = await greenlet_spawn(
             service.users()
             .labels()
             .update(userId="me", id=label_id, body=label_object)
@@ -3708,12 +3709,12 @@ async def manage_gmail_label(
         return f"Label updated successfully!\nName: {updated_label['name']}\nID: {updated_label['id']}"
 
     elif action == "delete":
-        label = await asyncio.to_thread(
+        label = await greenlet_spawn(
             service.users().labels().get(userId="me", id=label_id).execute
         )
         label_name = label["name"]
 
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.users().labels().delete(userId="me", id=label_id).execute
         )
         return f"Label '{label_name}' (ID: {label_id}) deleted successfully!"
@@ -3742,7 +3743,7 @@ async def list_gmail_filters(service, user_google_email: str) -> str:
     """
     logger.info(f"[list_gmail_filters] Invoked. Email: '{user_google_email}'")
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.users().settings().filters().list(userId="me").execute
     )
 
@@ -3845,7 +3846,7 @@ async def manage_gmail_filter(
             )
         logger.info("[manage_gmail_filter] Creating filter")
         filter_body = {"criteria": criteria, "action": filter_action}
-        created_filter = await asyncio.to_thread(
+        created_filter = await greenlet_spawn(
             service.users()
             .settings()
             .filters()
@@ -3858,10 +3859,10 @@ async def manage_gmail_filter(
         if not filter_id:
             raise ValueError("filter_id is required for delete action")
         logger.info(f"[manage_gmail_filter] Deleting filter {filter_id}")
-        filter_details = await asyncio.to_thread(
+        filter_details = await greenlet_spawn(
             service.users().settings().filters().get(userId="me", id=filter_id).execute
         )
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.users()
             .settings()
             .filters()
@@ -3929,7 +3930,7 @@ async def modify_gmail_message_labels(
     if remove_label_ids:
         body["removeLabelIds"] = remove_label_ids
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.users().messages().modify(userId="me", id=message_id, body=body).execute
     )
 
@@ -3989,7 +3990,7 @@ async def _verify_batch_label_changes(
                     .get(userId="me", id=mid, format="minimal"),
                     request_id=mid,
                 )
-            await asyncio.to_thread(batch.execute)
+            await greenlet_spawn(batch.execute)
             batch_completed = True
         except Exception as batch_error:
             # Same fallback the read tools use: sequential reads with a small
@@ -4112,7 +4113,7 @@ async def batch_modify_gmail_message_labels(
     if remove_label_ids:
         body["removeLabelIds"] = remove_label_ids
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.users().messages().batchModify(userId="me", body=body).execute
     )
 

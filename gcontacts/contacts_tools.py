@@ -4,7 +4,6 @@ Google Contacts MCP Tools (People API)
 This module provides MCP tools for interacting with Google Contacts via the People API.
 """
 
-import asyncio
 import logging
 import warnings
 from typing import Any, Dict, List, Literal, Optional
@@ -29,6 +28,7 @@ from gcontacts.contacts_helpers import (
     _merge_user_defined,
     _parse_birthday,
 )
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -544,7 +544,7 @@ async def _warmup_search_cache(service: Resource, user_google_email: str) -> Non
 
     try:
         logger.debug(f"[contacts] Warming up search cache for {user_google_email}")
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.people()
             .searchContacts(query="", readMask="names", pageSize=1)
             .execute
@@ -608,7 +608,7 @@ async def list_contacts(
     if sort_order:
         params["sortOrder"] = sort_order
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.people().connections().list(**params).execute
     )
 
@@ -669,7 +669,7 @@ async def get_contact(
         f"[get_contact] Invoked. Email: '{user_google_email}', Contact: {resource_name}"
     )
 
-    person = await asyncio.to_thread(
+    person = await greenlet_spawn(
         service.people()
         .get(resourceName=resource_name, personFields=DETAILED_PERSON_FIELDS)
         .execute
@@ -722,7 +722,7 @@ async def search_contacts(
     # Warm up the search cache if needed
     await _warmup_search_cache(service, user_google_email)
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.people()
         .searchContacts(
             query=query,
@@ -888,7 +888,7 @@ async def manage_contact(
                 "At least one field (name, email, phone, etc.) must be provided."
             )
 
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.people()
             .createContact(body=body, personFields=DETAILED_PERSON_FIELDS)
             .execute
@@ -916,7 +916,7 @@ async def manage_contact(
         max_retries = 3
         for attempt in range(max_retries):
             # Fetch the contact to get current state and etag
-            current = await asyncio.to_thread(
+            current = await greenlet_spawn(
                 service.people()
                 .get(resourceName=resource_name, personFields=DETAILED_PERSON_FIELDS)
                 .execute
@@ -1030,7 +1030,7 @@ async def manage_contact(
                 update_person_fields.append("birthdays")
 
             try:
-                result = await asyncio.to_thread(
+                result = await greenlet_spawn(
                     service.people()
                     .updateContact(
                         resourceName=resource_name,
@@ -1056,7 +1056,7 @@ async def manage_contact(
                 raise
 
     # action == "delete"
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.people().deleteContact(resourceName=resource_name).execute
     )
 
@@ -1112,7 +1112,7 @@ async def list_contact_groups(
     if page_token:
         params["pageToken"] = page_token
 
-    result = await asyncio.to_thread(service.contactGroups().list(**params).execute)
+    result = await greenlet_spawn(service.contactGroups().list(**params).execute)
 
     groups = result.get("contactGroups", [])
     next_page_token = result.get("nextPageToken")
@@ -1183,7 +1183,7 @@ async def get_contact_group(
         raise UserInputError("max_members must be >= 1")
     max_members = min(max_members, 1000)
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.contactGroups()
         .get(
             resourceName=resource_name,
@@ -1329,7 +1329,7 @@ async def manage_contacts_batch(
             "readMask": DEFAULT_PERSON_FIELDS,
         }
 
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.people().batchCreateContacts(body=batch_body).execute
         )
 
@@ -1391,7 +1391,7 @@ async def manage_contacts_batch(
                 cid = f"people/{cid}"
             resource_names.append(cid)
 
-        batch_get_result = await asyncio.to_thread(
+        batch_get_result = await greenlet_spawn(
             service.people()
             .getBatchGet(
                 resourceNames=resource_names,
@@ -1478,7 +1478,7 @@ async def manage_contacts_batch(
             "readMask": DEFAULT_PERSON_FIELDS,
         }
 
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.people().batchUpdateContacts(body=batch_body).execute
         )
 
@@ -1512,7 +1512,7 @@ async def manage_contacts_batch(
 
     batch_body = {"resourceNames": resource_names}
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.people().batchDeleteContacts(body=batch_body).execute
     )
 
@@ -1577,7 +1577,7 @@ async def manage_contact_group(
 
         body = {"contactGroup": {"name": name}}
 
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.contactGroups().create(body=body).execute
         )
 
@@ -1609,7 +1609,7 @@ async def manage_contact_group(
 
         body = {"contactGroup": {"name": name}}
 
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.contactGroups()
             .update(resourceName=resource_name, body=body)
             .execute
@@ -1625,7 +1625,7 @@ async def manage_contact_group(
         return response
 
     if action == "delete":
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.contactGroups()
             .delete(resourceName=resource_name, deleteContacts=delete_contacts)
             .execute
@@ -1666,7 +1666,7 @@ async def manage_contact_group(
                 remove_names.append(contact_id)
         modify_body["resourceNamesToRemove"] = remove_names
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.contactGroups()
         .members()
         .modify(resourceName=resource_name, body=modify_body)

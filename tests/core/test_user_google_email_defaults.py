@@ -202,10 +202,10 @@ async def test_authenticate_service_account_uses_caller_email(monkeypatch):
         captured["subject"] = subject
         return fake_credentials
 
-    def fake_build(service_name, service_version, credentials):
+    def fake_build(service_name, service_version, http):
         captured["service_name"] = service_name
         captured["service_version"] = service_version
-        captured["credentials"] = credentials
+        captured["credentials"] = http.credentials
         return fake_service
 
     monkeypatch.setattr(
@@ -289,7 +289,7 @@ def _patch_service_account(monkeypatch, *, allowed_domains=""):
         captured["subject"] = subject
         return fake_credentials
 
-    def fake_build(service_name, service_version, credentials):
+    def fake_build(service_name, service_version, http):
         return fake_service
 
     monkeypatch.setattr(

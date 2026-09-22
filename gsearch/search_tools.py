@@ -5,7 +5,6 @@ This module provides MCP tools for interacting with Google Programmable Search E
 """
 
 import logging
-import asyncio
 import os
 from typing import Optional, Literal
 
@@ -14,6 +13,7 @@ from mcp.types import ToolAnnotations
 from auth.service_decorator import require_google_service
 from core.server import server
 from core.utils import handle_http_errors, StringList
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ async def search_custom(
         params["cr"] = country
 
     # Execute the search request
-    result = await asyncio.to_thread(service.cse().list(**params).execute)
+    result = await greenlet_spawn(service.cse().list(**params).execute)
 
     # Extract search information
     search_info = result.get("searchInformation", {})
@@ -222,7 +222,7 @@ async def get_search_engine_info(service, user_google_email: str) -> str:
         "num": 1,
     }
 
-    result = await asyncio.to_thread(service.cse().list(**params).execute)
+    result = await greenlet_spawn(service.cse().list(**params).execute)
 
     # Extract context information
     context = result.get("context", {})
