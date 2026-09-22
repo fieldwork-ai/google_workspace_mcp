@@ -117,10 +117,9 @@ async def _download_file_bytes(
     downloader = MediaIoBaseDownload(
         fh, _media_request(service, file_id, export_mime_type)
     )
-    loop = asyncio.get_event_loop()
     done = False
     while not done:
-        _status, done = await loop.run_in_executor(None, downloader.next_chunk)
+        _status, done = await greenlet_spawn(downloader.next_chunk)
     return fh.getvalue()
 
 
@@ -135,7 +134,6 @@ async def _download_file_to_temp(
     """
     tmp_file = NamedTemporaryFile(prefix="wsmcp_dl_", delete=False)
     tmp_path = Path(tmp_file.name)
-    loop = asyncio.get_event_loop()
     try:
         with tmp_file:
             downloader = MediaIoBaseDownload(
@@ -145,7 +143,7 @@ async def _download_file_to_temp(
             )
             done = False
             while not done:
-                _status, done = await loop.run_in_executor(None, downloader.next_chunk)
+                _status, done = await greenlet_spawn(downloader.next_chunk)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise

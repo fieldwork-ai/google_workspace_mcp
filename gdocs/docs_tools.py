@@ -305,10 +305,9 @@ async def get_doc_content(
 
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request_obj)
-        loop = asyncio.get_event_loop()
         done = False
         while not done:
-            status, done = await loop.run_in_executor(None, downloader.next_chunk)
+            status, done = await greenlet_spawn(downloader.next_chunk)
 
         file_content_bytes = fh.getvalue()
 
