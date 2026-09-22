@@ -1,15 +1,19 @@
 """
 External OAuth Provider for Google Workspace MCP
 
-Extends FastMCP's GoogleProvider to support external OAuth flows where
-access tokens (ya29.*) are issued by external systems and need validation.
+This server is a resource server only: it validates the bearer each request
+carries and never issues tokens. Two bearer forms are accepted:
 
-This provider acts as a Resource Server only - it validates tokens issued by
-Google's Authorization Server but does not issue tokens itself.
+- An app-signed identity claim (`auth.identity_claim`): the app in front of
+  this server already knows the Google account's subject and email from the
+  consent it ran, so it signs them together with the Google access token. The
+  signature is verified offline against `DATA_CLAIM_PUBLIC_KEYS`, no network.
+- A bare Google access token (`ya29.*`), validated with one async call to
+  Google's userinfo endpoint. Kept while callers still send this form.
+
+Standard JWT ID tokens fall through to FastMCP's GoogleProvider as before.
 """
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import functools
 import logging
 import os
@@ -19,23 +23,25 @@ from typing import Optional
 from starlette.routing import Route
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth import AccessToken
-from google.oauth2.credentials import Credentials
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from auth.identity_claim import (
+    IdentityClaim,
+    looks_like_identity_claim,
+    verify_identity_claim,
+)
 from auth.oauth_types import WorkspaceAccessToken
+from core.async_bridge import shared_client
 
 logger = logging.getLogger(__name__)
 
 # Google's OAuth 2.0 Authorization Server
 GOOGLE_ISSUER_URL = "https://accounts.google.com"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
 # Configurable session time in seconds (default: 1 hour, max: 24 hours)
 _DEFAULT_SESSION_TIME = 3600
 _MAX_SESSION_TIME = 86400
-
-# Token validation is unauthenticated work and may block for the full Google API
-# socket timeout. Keep it out of asyncio's process-wide default executor so a burst
-# of invalid tokens cannot starve authenticated Google Workspace operations.
-_DEFAULT_TOKEN_VALIDATION_WORKERS = 4
 
 
 @functools.lru_cache(maxsize=1)
@@ -83,13 +89,15 @@ class ExternalOAuthProvider(GoogleProvider):
         client_id: str,
         client_secret: Optional[str] = None,
         resource_server_url: Optional[str] = None,
-        token_validation_workers: int = _DEFAULT_TOKEN_VALIDATION_WORKERS,
+        identity_claim_keys: Optional[list[Ed25519PublicKey]] = None,
         **kwargs,
     ):
-        """Initialize and store client credentials for token validation."""
-        if token_validation_workers < 1:
-            raise ValueError("token_validation_workers must be at least 1")
+        """Initialize and store client credentials for token validation.
 
+        `identity_claim_keys` are the Ed25519 public keys app-signed identity
+        claims are verified against; with none, only bare Google access tokens
+        and JWTs are accepted.
+        """
         self._resource_server_url = resource_server_url
         if resource_server_url and "resource_base_url" not in kwargs:
             kwargs["resource_base_url"] = resource_server_url
@@ -99,119 +107,90 @@ class ExternalOAuthProvider(GoogleProvider):
         self._client_secret = client_secret
         # Store as string - Pydantic validates it when passed to models
         self.resource_server_url = self._resource_server_url
-        self._token_validation_executor: Optional[ThreadPoolExecutor] = (
-            ThreadPoolExecutor(
-                max_workers=token_validation_workers,
-                thread_name_prefix="external-token-validation",
-            )
-        )
-        # ThreadPoolExecutor has an unbounded internal queue. Admit no more work
-        # than can run immediately so overload fails closed instead of accumulating.
-        self._token_validation_slots = asyncio.Semaphore(token_validation_workers)
-
-    def close(self) -> None:
-        """Stop accepting token-validation work and release executor resources."""
-        executor = self._token_validation_executor
-        if executor is None:
-            return
-        self._token_validation_executor = None
-        executor.shutdown(wait=False, cancel_futures=True)
+        self._identity_claim_keys = list(identity_claim_keys or [])
 
     async def verify_token(self, token: str) -> Optional[AccessToken]:
         """
-        Verify a token - supports both JWT ID tokens and ya29.* access tokens.
-
-        For ya29.* access tokens (issued externally), validates by calling
-        Google's userinfo API. For JWT tokens, delegates to parent class.
-
-        Args:
-            token: Token string to verify (JWT or ya29.* access token)
+        Verify a bearer: an app-signed identity claim, a bare Google access
+        token (ya29.*), or a JWT ID token (delegated to the parent class).
 
         Returns:
             AccessToken object if valid, None otherwise
         """
-        # For ya29.* access tokens, validate using Google's userinfo API
         if token.startswith("ya29."):
-            logger.debug("Validating external Google OAuth access token")
-
-            try:
-                from auth.google_auth import get_user_info
-
-                # Create minimal Credentials object for userinfo API call
-                credentials = Credentials(
-                    token=token,
-                    token_uri="https://oauth2.googleapis.com/token",
-                    client_id=self._client_id,
-                    client_secret=self._client_secret,
+            user_info = await self._fetch_userinfo(token)
+            if not user_info or not user_info.get("email"):
+                logger.warning(
+                    "bearer form=google-access-token refused: userinfo did not identify the account"
                 )
-
-                # Validate token by calling userinfo API. This is deliberately
-                # isolated from asyncio's default executor, which handles the
-                # authenticated Google Workspace API calls throughout the server.
-                if self._token_validation_slots.locked():
-                    logger.warning(
-                        "External token validation capacity exhausted; rejecting token"
-                    )
-                    return None
-
-                await self._token_validation_slots.acquire()
-                executor = self._token_validation_executor
-                if executor is None:
-                    self._token_validation_slots.release()
-                    logger.warning(
-                        "External token validation requested after provider shutdown"
-                    )
-                    return None
-
-                try:
-                    validation_future = asyncio.get_running_loop().run_in_executor(
-                        executor,
-                        functools.partial(
-                            get_user_info, credentials, skip_valid_check=True
-                        ),
-                    )
-                except Exception:
-                    self._token_validation_slots.release()
-                    raise
-
-                # Shield the worker future so request cancellation does not mark it
-                # complete and release the slot while its HTTPS call is still running.
-                validation_future.add_done_callback(
-                    lambda _: self._token_validation_slots.release()
-                )
-                user_info = await asyncio.shield(validation_future)
-
-                if user_info and user_info.get("email"):
-                    session_time = get_session_time()
-                    # Token is valid - create AccessToken object
-                    logger.info(
-                        f"Validated external access token for: {user_info['email']}"
-                    )
-
-                    scope_list = list(getattr(self, "required_scopes", []) or [])
-                    access_token = WorkspaceAccessToken(
-                        token=token,
-                        scopes=scope_list,
-                        expires_at=int(time.time()) + session_time,
-                        claims={
-                            "email": user_info["email"],
-                            "sub": user_info.get("id"),
-                        },
-                        client_id=self._client_id,
-                        email=user_info["email"],
-                        sub=user_info.get("id"),
-                    )
-                    return access_token
-                else:
-                    logger.error("Could not get user info from access token")
-                    return None
-
-            except Exception as e:
-                logger.error(f"Error validating external access token: {e}")
                 return None
+            logger.info(
+                "bearer form=google-access-token accepted for: %s", user_info["email"]
+            )
+            return self._access_token(
+                token, email=user_info["email"], sub=user_info.get("id")
+            )
+
+        if looks_like_identity_claim(token):
+            if not self._identity_claim_keys:
+                logger.warning(
+                    "bearer form=identity-claim refused: no DATA_CLAIM_PUBLIC_KEYS configured"
+                )
+                return None
+            claim = verify_identity_claim(token, self._identity_claim_keys)
+            if not isinstance(claim, IdentityClaim):
+                logger.warning("bearer form=identity-claim refused: %s", claim.reason)
+                return None
+            logger.info("bearer form=identity-claim accepted for: %s", claim.email)
+            return self._access_token(
+                claim.token, email=claim.email, sub=claim.sub, expires_at=claim.exp
+            )
 
         # For JWT tokens, use parent class implementation
         return await super().verify_token(token)
+
+    def _access_token(
+        self,
+        google_token: str,
+        *,
+        email: str,
+        sub: Optional[str],
+        expires_at: Optional[int] = None,
+    ) -> WorkspaceAccessToken:
+        """The one access-token shape every form produces; `token` is the
+        Google access token the handlers call Google with."""
+        return WorkspaceAccessToken(
+            token=google_token,
+            scopes=list(getattr(self, "required_scopes", []) or []),
+            expires_at=expires_at
+            if expires_at is not None
+            else int(time.time()) + get_session_time(),
+            claims={"email": email, "sub": sub},
+            client_id=self._client_id,
+            email=email,
+            sub=sub,
+        )
+
+    async def _fetch_userinfo(self, token: str) -> Optional[dict]:
+        """Ask Google whose token this is: one GET on the shared client."""
+        try:
+            response = await shared_client().get(
+                GOOGLE_USERINFO_URL, headers={"Authorization": f"Bearer {token}"}
+            )
+        except Exception as exc:  # noqa: BLE001 - a refusal, logged, never a crash
+            logger.error("Error validating external access token: %s", exc)
+            return None
+        if response.status_code != 200:
+            logger.error(
+                "userinfo answered %s for an external access token",
+                response.status_code,
+            )
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            logger.error("userinfo answered with a body that is not JSON")
+            return None
 
     def get_routes(self, mcp_path: str | None = None) -> list[Route]:
         """

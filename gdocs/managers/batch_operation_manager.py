@@ -6,7 +6,6 @@ extracting complex validation and request building logic.
 """
 
 import logging
-import asyncio
 from typing import Any, Union, Dict, List, Tuple
 
 from gdocs.docs_helpers import (
@@ -43,6 +42,7 @@ from gdocs.docs_helpers import (
     validate_operation,
 )
 from gdocs.managers.validation_manager import ValidationManager
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ class BatchOperationManager:
 
             # Fetch document length after batch for downstream chaining
             try:
-                doc = await asyncio.to_thread(
+                doc = await greenlet_spawn(
                     self.service.documents()
                     .get(documentId=document_id, fields="body/content(endIndex)")
                     .execute
@@ -165,7 +165,7 @@ class BatchOperationManager:
         if not create_ops:
             return None
 
-        doc = await asyncio.to_thread(
+        doc = await greenlet_spawn(
             self.service.documents().get(documentId=document_id).execute
         )
 
@@ -911,7 +911,7 @@ class BatchOperationManager:
         Returns:
             API response
         """
-        return await asyncio.to_thread(
+        return await greenlet_spawn(
             self.service.documents()
             .batchUpdate(documentId=document_id, body={"requests": requests})
             .execute

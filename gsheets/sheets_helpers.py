@@ -5,13 +5,13 @@ Shared utilities for Google Sheets operations including A1 parsing and
 conditional formatting helpers.
 """
 
-import asyncio
 import json
 import logging
 import re
 from typing import List, Optional, Union
 
 from core.utils import UserInputError
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -522,7 +522,7 @@ def _extract_cell_hyperlinks_from_grid(spreadsheet: dict) -> list[dict[str, str]
 async def _fetch_detailed_sheet_errors(
     service, spreadsheet_id: str, a1_range: str
 ) -> list[dict[str, Optional[str]]]:
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -538,7 +538,7 @@ async def _fetch_detailed_sheet_errors(
 async def _fetch_sheet_hyperlinks(
     service, spreadsheet_id: str, a1_range: str
 ) -> list[dict[str, str]]:
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -794,7 +794,7 @@ async def _fetch_sheets_with_rules(
     """
     Fetch sheets with titles and conditional format rules in a single request.
     """
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -1026,7 +1026,7 @@ async def _fetch_sheet_notes(
     service, spreadsheet_id: str, a1_range: str
 ) -> list[dict[str, str]]:
     """Fetch cell notes for the given range via spreadsheets.get with includeGridData."""
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -1076,7 +1076,7 @@ async def _fetch_cell_formulas(
     Returns an empty section and empty values list if the request fails.
     """
     try:
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.spreadsheets()
             .values()
             .get(
@@ -1194,7 +1194,7 @@ async def _fetch_grid_metadata(
     )
 
     try:
-        response = await asyncio.to_thread(
+        response = await greenlet_spawn(
             service.spreadsheets()
             .get(
                 spreadsheetId=spreadsheet_id,

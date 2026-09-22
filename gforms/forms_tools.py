@@ -5,7 +5,6 @@ This module provides MCP tools for interacting with Google Forms API.
 """
 
 import logging
-import asyncio
 import json
 from typing import List, Optional, Dict, Any
 
@@ -15,6 +14,7 @@ from mcp.types import ToolAnnotations
 from auth.service_decorator import require_google_service
 from core.server import server
 from core.utils import handle_http_errors
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -160,9 +160,7 @@ async def create_form(
     if document_title:
         form_body["info"]["document_title"] = document_title
 
-    created_form = await asyncio.to_thread(
-        service.forms().create(body=form_body).execute
-    )
+    created_form = await greenlet_spawn(service.forms().create(body=form_body).execute)
 
     form_id = created_form.get("formId")
     edit_url = f"https://docs.google.com/forms/d/{form_id}/edit"
@@ -199,7 +197,7 @@ async def get_form(service, user_google_email: str, form_id: str) -> str:
     """
     logger.info(f"[get_form] Invoked. Email: '{user_google_email}', Form ID: {form_id}")
 
-    form = await asyncio.to_thread(service.forms().get(formId=form_id).execute)
+    form = await greenlet_spawn(service.forms().get(formId=form_id).execute)
 
     form_info = form.get("info", {})
     title = form_info.get("title", "No Title")
@@ -291,7 +289,7 @@ async def set_publish_settings(
         "updateMask": "publishState",
     }
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.forms().setPublishSettings(formId=form_id, body=settings_body).execute
     )
 
@@ -331,7 +329,7 @@ async def get_form_response(
         f"[get_form_response] Invoked. Email: '{user_google_email}', Form ID: {form_id}, Response ID: {response_id}"
     )
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.forms().responses().get(formId=form_id, responseId=response_id).execute
     )
 
@@ -403,7 +401,7 @@ async def list_form_responses(
     if page_token:
         params["pageToken"] = page_token
 
-    responses_result = await asyncio.to_thread(
+    responses_result = await greenlet_spawn(
         service.forms().responses().list(**params).execute
     )
 
@@ -462,7 +460,7 @@ async def _batch_update_form_impl(
     """
     body = {"requests": requests}
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.forms().batchUpdate(formId=form_id, body=body).execute
     )
 

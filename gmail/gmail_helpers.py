@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Option
 
 from fastmcp.exceptions import ToolError as ToolExecutionError
 from googleapiclient.errors import HttpError
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,7 @@ async def _fetch_with_retry(
     last_error: Optional[Exception] = None
     for attempt in range(max_retries + 1):
         try:
-            response = await asyncio.to_thread(build_request().execute)
+            response = await greenlet_spawn(build_request().execute)
             return item_id, response, None
         except Exception as error:
             last_error = error
@@ -654,7 +655,7 @@ def _signature_html_to_text(signature_html: str) -> str:
 async def _get_send_as_entries(service) -> List[Dict[str, Any]]:
     """Fetch the account's Gmail send-as settings."""
     try:
-        response = await asyncio.to_thread(
+        response = await greenlet_spawn(
             service.users().settings().sendAs().list(userId="me").execute
         )
     except HttpError as e:

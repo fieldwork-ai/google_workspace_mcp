@@ -5,7 +5,6 @@ This module provides MCP tools for interacting with Google Sheets API.
 """
 
 import logging
-import asyncio
 import json
 import copy
 from typing import List, Optional, Union
@@ -37,6 +36,7 @@ from gsheets.sheets_helpers import (
     _select_sheet,
     _values_contain_sheets_errors,
 )
+from core.async_bridge import greenlet_spawn
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ async def list_spreadsheets(
     """
     logger.info(f"[list_spreadsheets] Invoked. Email: '{user_google_email}'")
 
-    files_response = await asyncio.to_thread(
+    files_response = await greenlet_spawn(
         service.files()
         .list(
             q="mimeType='application/vnd.google-apps.spreadsheet'",
@@ -133,7 +133,7 @@ async def get_spreadsheet_info(
         f"[get_spreadsheet_info] Invoked. Email: '{user_google_email}', Spreadsheet ID: {spreadsheet_id}"
     )
 
-    spreadsheet = await asyncio.to_thread(
+    spreadsheet = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -242,7 +242,7 @@ async def read_sheet_values(
             MAX_READ_SHEET_ROWS,
         )
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.spreadsheets()
         .values()
         .get(spreadsheetId=spreadsheet_id, range=fetch_range)
@@ -395,7 +395,7 @@ async def modify_sheet_values(
         )
 
     if clear_values:
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.spreadsheets()
             .values()
             .clear(spreadsheetId=spreadsheet_id, range=range_name)
@@ -410,7 +410,7 @@ async def modify_sheet_values(
     else:
         body = {"values": values}
 
-        result = await asyncio.to_thread(
+        result = await greenlet_spawn(
             service.spreadsheets()
             .values()
             .update(
@@ -582,7 +582,7 @@ async def _format_sheet_range_impl(
             )
 
     # Get sheet metadata for range parsing
-    metadata = await asyncio.to_thread(
+    metadata = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -664,7 +664,7 @@ async def _format_sheet_range_impl(
         ]
     }
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.spreadsheets()
         .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
         .execute
@@ -939,7 +939,7 @@ async def manage_conditional_formatting(
 
         request_body = {"requests": [{"addConditionalFormatRule": add_rule_request}]}
 
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.spreadsheets()
             .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
             .execute
@@ -1124,7 +1124,7 @@ async def manage_conditional_formatting(
             ]
         }
 
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.spreadsheets()
             .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
             .execute
@@ -1177,7 +1177,7 @@ async def manage_conditional_formatting(
             ]
         }
 
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.spreadsheets()
             .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
             .execute
@@ -1236,7 +1236,7 @@ async def create_spreadsheet(
             {"properties": {"title": sheet_name}} for sheet_name in sheet_names
         ]
 
-    spreadsheet = await asyncio.to_thread(
+    spreadsheet = await greenlet_spawn(
         service.spreadsheets()
         .create(
             body=spreadsheet_body,
@@ -1298,7 +1298,7 @@ async def create_sheet(
             f"Spreadsheet: {spreadsheet_id}, Source: {source_sheet_name}"
         )
 
-        spreadsheet = await asyncio.to_thread(
+        spreadsheet = await greenlet_spawn(
             service.spreadsheets()
             .get(spreadsheetId=spreadsheet_id, fields="sheets.properties")
             .execute
@@ -1316,7 +1316,7 @@ async def create_sheet(
 
         request_body = {"requests": [{"duplicateSheet": dup_request}]}
 
-        response = await asyncio.to_thread(
+        response = await greenlet_spawn(
             service.spreadsheets()
             .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
             .execute
@@ -1349,7 +1349,7 @@ async def create_sheet(
 
     request_body = {"requests": [{"addSheet": add_request}]}
 
-    response = await asyncio.to_thread(
+    response = await greenlet_spawn(
         service.spreadsheets()
         .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
         .execute
@@ -1411,7 +1411,7 @@ async def list_sheet_tables(
         f"Spreadsheet: {spreadsheet_id}"
     )
 
-    spreadsheet = await asyncio.to_thread(
+    spreadsheet = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -1513,7 +1513,7 @@ async def append_table_rows(
         raise UserInputError("values must be a non-empty 2D list of cell values.")
 
     # Resolve the sheet ID for the table before building the request
-    spreadsheet = await asyncio.to_thread(
+    spreadsheet = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -1563,7 +1563,7 @@ async def append_table_rows(
         ]
     }
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.spreadsheets()
         .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
         .execute
@@ -1740,7 +1740,7 @@ async def _resize_sheet_dimensions_impl(
     delete_columns = _parse_json(delete_columns, "delete_columns")
 
     # Get sheet metadata to resolve sheet ID
-    metadata = await asyncio.to_thread(
+    metadata = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -2154,7 +2154,7 @@ async def _resize_sheet_dimensions_impl(
         )
 
     # Execute batch update
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.spreadsheets()
         .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
         .execute
@@ -2340,7 +2340,7 @@ async def move_sheet_rows(
     if source_sheet == destination_sheet:
         raise UserInputError("source_sheet and destination_sheet must be different.")
 
-    spreadsheet = await asyncio.to_thread(
+    spreadsheet = await greenlet_spawn(
         service.spreadsheets()
         .get(
             spreadsheetId=spreadsheet_id,
@@ -2358,7 +2358,7 @@ async def move_sheet_rows(
     # Validate that the source row block actually contains data.
     safe_source = source_sheet.replace("'", "''")
     src_range = f"'{safe_source}'!{start_row}:{end_row}"
-    src_values = await asyncio.to_thread(
+    src_values = await greenlet_spawn(
         service.spreadsheets()
         .values()
         .get(spreadsheetId=spreadsheet_id, range=src_range)
@@ -2375,7 +2375,7 @@ async def move_sheet_rows(
     # sheet), not the count of rows containing data.  Fetch all columns so the
     # append position reflects any non-empty cell, not just column A.
     safe_destination = destination_sheet.replace("'", "''")
-    dst_values = await asyncio.to_thread(
+    dst_values = await greenlet_spawn(
         service.spreadsheets()
         .values()
         .get(
@@ -2433,7 +2433,7 @@ async def move_sheet_rows(
         ]
     )
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.spreadsheets()
         .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
         .execute

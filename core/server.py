@@ -697,6 +697,24 @@ def configure_server_for_http():
             if config.is_external_oauth21_provider():
                 # External OAuth mode: use custom provider that handles ya29.* access tokens
                 from auth.external_oauth_provider import ExternalOAuthProvider
+                from auth.identity_claim import parse_public_keys
+
+                # The app in front of this server signs the caller's identity
+                # into the bearer; without the keys to verify that, external
+                # mode cannot serve its one caller, so refuse to start rather
+                # than run a server that rejects every request.
+                raw_keys = os.getenv("DATA_CLAIM_PUBLIC_KEYS", "").strip()
+                if not raw_keys:
+                    raise RuntimeError(
+                        "EXTERNAL_OAUTH21_PROVIDER=true requires DATA_CLAIM_PUBLIC_KEYS "
+                        "(comma-separated base64 DER Ed25519 public keys)"
+                    )
+                try:
+                    identity_claim_keys = parse_public_keys(raw_keys)
+                except (ValueError, TypeError) as exc:
+                    raise RuntimeError(
+                        f"DATA_CLAIM_PUBLIC_KEYS is not parseable: {exc}"
+                    ) from exc
 
                 provider = ExternalOAuthProvider(
                     client_id=config.client_id,
@@ -706,13 +724,16 @@ def configure_server_for_http():
                     required_scopes=provider_valid_scopes,
                     resource_server_url=config.get_oauth_base_url(),
                     jwt_signing_key=jwt_signing_key,
+                    identity_claim_keys=identity_claim_keys,
                     **expiry_kwargs,
                 )
                 server.auth = provider
 
                 logger.info("OAuth 2.1 enabled with EXTERNAL provider mode")
                 logger.info(
-                    "Expecting Authorization bearer tokens in tool call headers"
+                    "Expecting Authorization bearer tokens in tool call headers "
+                    f"(app-signed identity claims verified against {len(identity_claim_keys)} key(s), "
+                    "or bare Google access tokens)"
                 )
                 logger.info(
                     "Protected resource metadata points to Google's authorization server"

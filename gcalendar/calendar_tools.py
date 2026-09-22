@@ -6,7 +6,6 @@ This module provides MCP tools for interacting with Google Calendar API.
 
 import datetime
 import logging
-import asyncio
 import re
 import uuid
 import json
@@ -29,6 +28,7 @@ from gcalendar.calendar_helpers import (
 from mcp.types import ToolAnnotations
 
 from core.server import server
+from core.async_bridge import greenlet_spawn
 
 
 # Configure module logger
@@ -374,7 +374,7 @@ async def list_calendars(service, user_google_email: str) -> str:
     """
     logger.info(f"[list_calendars] Invoked. Email: '{user_google_email}'")
 
-    calendar_list_response = await asyncio.to_thread(
+    calendar_list_response = await greenlet_spawn(
         lambda: service.calendarList().list().execute()
     )
     items = calendar_list_response.get("items", [])
@@ -443,7 +443,7 @@ async def get_events(
     # Handle single event retrieval
     if event_id:
         logger.info(f"[get_events] Retrieving single event with ID: {event_id}")
-        event = await asyncio.to_thread(
+        event = await greenlet_spawn(
             lambda: (
                 service.events().get(calendarId=calendar_id, eventId=event_id).execute()
             )
@@ -504,7 +504,7 @@ async def get_events(
         if query:
             request_params["q"] = query
 
-        events_result = await asyncio.to_thread(
+        events_result = await greenlet_spawn(
             lambda: service.events().list(**request_params).execute()
         )
         items = events_result.get("items", [])
@@ -831,7 +831,7 @@ async def _create_event_impl(
                     # Try to get the actual MIME type and filename from Drive
                     if drive_service:
                         try:
-                            file_metadata = await asyncio.to_thread(
+                            file_metadata = await greenlet_spawn(
                                 lambda: (
                                     drive_service.files()
                                     .get(
@@ -867,7 +867,7 @@ async def _create_event_impl(
         finally:
             if drive_service:
                 drive_service.close()
-        created_event = await asyncio.to_thread(
+        created_event = await greenlet_spawn(
             lambda: (
                 service.events()
                 .insert(
@@ -881,7 +881,7 @@ async def _create_event_impl(
             )
         )
     else:
-        created_event = await asyncio.to_thread(
+        created_event = await greenlet_spawn(
             lambda: (
                 service.events()
                 .insert(
@@ -1109,7 +1109,7 @@ async def _modify_event_impl(
 
     # Get the existing event to preserve fields that aren't being updated
     try:
-        existing_event = await asyncio.to_thread(
+        existing_event = await greenlet_spawn(
             lambda: (
                 service.events().get(calendarId=calendar_id, eventId=event_id).execute()
             )
@@ -1150,7 +1150,7 @@ async def _modify_event_impl(
                 f"[modify_event] Error during pre-update verification, but proceeding with update: {get_error}"
             )
 
-    updated_event = await asyncio.to_thread(
+    updated_event = await greenlet_spawn(
         lambda: (
             service.events()
             .patch(
@@ -1206,7 +1206,7 @@ async def _delete_event_impl(
 
     # Try to get the event first to verify it exists
     try:
-        await asyncio.to_thread(
+        await greenlet_spawn(
             lambda: (
                 service.events().get(calendarId=calendar_id, eventId=event_id).execute()
             )
@@ -1225,7 +1225,7 @@ async def _delete_event_impl(
             )
 
     # Proceed with the deletion
-    await asyncio.to_thread(
+    await greenlet_spawn(
         lambda: (
             service.events()
             .delete(
@@ -1258,7 +1258,7 @@ async def _rsvp_event_impl(
             f"Invalid response '{response}'. Must be one of: {sorted(valid_responses)}"
         )
 
-    existing_event = await asyncio.to_thread(
+    existing_event = await greenlet_spawn(
         lambda: service.events().get(calendarId=calendar_id, eventId=event_id).execute()
     )
 
@@ -1282,7 +1282,7 @@ async def _rsvp_event_impl(
     if comment is not None:
         updated_attendees[user_index]["comment"] = comment
 
-    updated_event = await asyncio.to_thread(
+    updated_event = await greenlet_spawn(
         lambda: (
             service.events()
             .patch(
@@ -1595,7 +1595,7 @@ async def _create_ooo_event_impl(
     if recurrence:
         event_body["recurrence"] = recurrence
 
-    created_event = await asyncio.to_thread(
+    created_event = await greenlet_spawn(
         lambda: (
             service.events().insert(calendarId=calendar_id, body=event_body).execute()
         )
@@ -1678,7 +1678,7 @@ async def _list_ooo_events_impl(
     if effective_time_max:
         request_params["timeMax"] = effective_time_max
 
-    events_result = await asyncio.to_thread(
+    events_result = await greenlet_spawn(
         lambda: service.events().list(**request_params).execute()
     )
     items = events_result.get("items", [])
@@ -1728,7 +1728,7 @@ async def _update_ooo_event_impl(
         f"[update_ooo_event] Invoked. Email: '{user_google_email}', Event ID: {event_id}"
     )
 
-    existing_event = await asyncio.to_thread(
+    existing_event = await greenlet_spawn(
         lambda: service.events().get(calendarId=calendar_id, eventId=event_id).execute()
     )
 
@@ -1769,7 +1769,7 @@ async def _update_ooo_event_impl(
     if not patch_body:
         return f"No changes specified for Out of Office event '{event_id}'."
 
-    updated_event = await asyncio.to_thread(
+    updated_event = await greenlet_spawn(
         lambda: (
             service.events()
             .patch(calendarId=calendar_id, eventId=event_id, body=patch_body)
@@ -1811,7 +1811,7 @@ async def _delete_ooo_event_impl(
     )
 
     try:
-        existing_event = await asyncio.to_thread(
+        existing_event = await greenlet_spawn(
             lambda: (
                 service.events().get(calendarId=calendar_id, eventId=event_id).execute()
             )
@@ -1829,7 +1829,7 @@ async def _delete_ooo_event_impl(
         else:
             raise
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         lambda: (
             service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
         )
@@ -2047,7 +2047,7 @@ async def _create_focus_time_event_impl(
     if recurrence:
         event_body["recurrence"] = recurrence
 
-    created_event = await asyncio.to_thread(
+    created_event = await greenlet_spawn(
         lambda: (
             service.events().insert(calendarId=calendar_id, body=event_body).execute()
         )
@@ -2131,7 +2131,7 @@ async def _list_focus_time_events_impl(
     if effective_time_max:
         request_params["timeMax"] = effective_time_max
 
-    events_result = await asyncio.to_thread(
+    events_result = await greenlet_spawn(
         lambda: service.events().list(**request_params).execute()
     )
     items = events_result.get("items", [])
@@ -2186,7 +2186,7 @@ async def _update_focus_time_event_impl(
         f"[update_focus_time_event] Invoked. Email: '{user_google_email}', Event ID: {event_id}"
     )
 
-    existing_event = await asyncio.to_thread(
+    existing_event = await greenlet_spawn(
         lambda: service.events().get(calendarId=calendar_id, eventId=event_id).execute()
     )
 
@@ -2241,7 +2241,7 @@ async def _update_focus_time_event_impl(
     if not patch_body:
         return f"No changes specified for Focus Time event '{event_id}'."
 
-    updated_event = await asyncio.to_thread(
+    updated_event = await greenlet_spawn(
         lambda: (
             service.events()
             .patch(calendarId=calendar_id, eventId=event_id, body=patch_body)
@@ -2283,7 +2283,7 @@ async def _delete_focus_time_event_impl(
     )
 
     try:
-        existing_event = await asyncio.to_thread(
+        existing_event = await greenlet_spawn(
             lambda: (
                 service.events().get(calendarId=calendar_id, eventId=event_id).execute()
             )
@@ -2301,7 +2301,7 @@ async def _delete_focus_time_event_impl(
         else:
             raise
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         lambda: (
             service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
         )
@@ -2499,7 +2499,7 @@ async def query_freebusy(
     )
 
     # Execute the freebusy query
-    freebusy_result = await asyncio.to_thread(
+    freebusy_result = await greenlet_spawn(
         lambda: service.freebusy().query(body=request_body).execute()
     )
 
@@ -2592,7 +2592,7 @@ async def create_calendar(
     if timezone:
         body["timeZone"] = timezone
 
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         lambda: service.calendars().insert(body=body).execute()
     )
 

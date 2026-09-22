@@ -65,6 +65,7 @@ from gdrive.drive_helpers import (
     validate_share_role,
     validate_share_type,
 )
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -116,10 +117,9 @@ async def _download_file_bytes(
     downloader = MediaIoBaseDownload(
         fh, _media_request(service, file_id, export_mime_type)
     )
-    loop = asyncio.get_event_loop()
     done = False
     while not done:
-        _status, done = await loop.run_in_executor(None, downloader.next_chunk)
+        _status, done = await greenlet_spawn(downloader.next_chunk)
     return fh.getvalue()
 
 
@@ -134,7 +134,6 @@ async def _download_file_to_temp(
     """
     tmp_file = NamedTemporaryFile(prefix="wsmcp_dl_", delete=False)
     tmp_path = Path(tmp_file.name)
-    loop = asyncio.get_event_loop()
     try:
         with tmp_file:
             downloader = MediaIoBaseDownload(
@@ -144,7 +143,7 @@ async def _download_file_to_temp(
             )
             done = False
             while not done:
-                _status, done = await loop.run_in_executor(None, downloader.next_chunk)
+                _status, done = await greenlet_spawn(downloader.next_chunk)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -269,7 +268,7 @@ async def search_drive_files(
         order_by=order_by,
     )
 
-    results = await asyncio.to_thread(service.files().list(**list_params).execute)
+    results = await greenlet_spawn(service.files().list(**list_params).execute)
     files = results.get("files", [])
     if not files:
         return f"No files found for '{query}'."
@@ -726,7 +725,7 @@ async def list_drive_items(
         order_by=order_by,
     )
 
-    results = await asyncio.to_thread(service.files().list(**list_params).execute)
+    results = await greenlet_spawn(service.files().list(**list_params).execute)
     files = results.get("files", [])
     if not files:
         return f"No items found in folder '{folder_id}'."
@@ -802,7 +801,7 @@ async def _list_shared_drives_impl(
     if query:
         list_params["q"] = query
 
-    results = await asyncio.to_thread(service.drives().list(**list_params).execute)
+    results = await greenlet_spawn(service.drives().list(**list_params).execute)
     drives = results.get("drives", [])
     if not drives:
         return f"No shared drives found for {user_google_email}."
@@ -828,7 +827,7 @@ async def _list_shared_drives_impl(
                     if next_permission_page_token:
                         list_kwargs["pageToken"] = next_permission_page_token
 
-                    perms = await asyncio.to_thread(
+                    perms = await greenlet_spawn(
                         service.permissions().list(**list_kwargs).execute
                     )
                     permissions.extend(perms.get("permissions", []))
@@ -911,7 +910,7 @@ async def _create_drive_folder_impl(
         "parents": [resolved_folder_id],
         "mimeType": FOLDER_MIME_TYPE,
     }
-    created_file = await asyncio.to_thread(
+    created_file = await greenlet_spawn(
         service.files()
         .create(
             body=file_metadata,
@@ -1083,7 +1082,7 @@ async def create_drive_file(
             chunksize=UPLOAD_CHUNK_SIZE_BYTES,
         )
 
-        created_file = await asyncio.to_thread(
+        created_file = await greenlet_spawn(
             service.files()
             .create(
                 body=file_metadata,
@@ -1161,7 +1160,7 @@ async def create_drive_file(
             )
 
             logger.info("[create_drive_file] Starting upload to Google Drive...")
-            created_file = await asyncio.to_thread(
+            created_file = await greenlet_spawn(
                 service.files()
                 .create(
                     body=file_metadata,
@@ -1201,7 +1200,7 @@ async def create_drive_file(
                         chunksize=UPLOAD_CHUNK_SIZE_BYTES,
                     )
 
-                    created_file = await asyncio.to_thread(
+                    created_file = await greenlet_spawn(
                         service.files()
                         .create(
                             body=file_metadata,
@@ -1249,7 +1248,7 @@ async def create_drive_file(
                     logger.info(
                         "[create_drive_file] Starting upload to Google Drive..."
                     )
-                    created_file = await asyncio.to_thread(
+                    created_file = await greenlet_spawn(
                         service.files()
                         .create(
                             body=file_metadata,
@@ -1272,7 +1271,7 @@ async def create_drive_file(
         file_data = content.encode("utf-8")
         media = io.BytesIO(file_data)
 
-        created_file = await asyncio.to_thread(
+        created_file = await greenlet_spawn(
             service.files()
             .create(
                 body=file_metadata,
@@ -1360,7 +1359,7 @@ async def _import_with_conversion(
         f"{source_mime_type} → {target_mime_type}"
     )
     try:
-        created_file = await asyncio.to_thread(
+        created_file = await greenlet_spawn(
             service.files()
             .create(
                 body=file_metadata,
@@ -1661,7 +1660,7 @@ async def get_drive_file_permissions(
 
     try:
         # Get comprehensive file metadata including permissions with details
-        file_metadata = await asyncio.to_thread(
+        file_metadata = await greenlet_spawn(
             service.files()
             .get(
                 fileId=file_id,
@@ -1679,7 +1678,7 @@ async def get_drive_file_permissions(
         # (and the `shared` boolean) on files.get(), so fetch via permissions.list().
         _perms_for_shared = file_metadata.get("permissions", [])
         if file_metadata.get("driveId"):
-            _perms_for_shared = await asyncio.to_thread(
+            _perms_for_shared = await greenlet_spawn(
                 list_all_permissions, service, file_id
             )
         parents = file_metadata.get("parents")
@@ -1833,7 +1832,7 @@ async def check_drive_file_public_access(
         list_params["corpora"] = "drive"
         list_params["driveId"] = drive_id
 
-    results = await asyncio.to_thread(service.files().list(**list_params).execute)
+    results = await greenlet_spawn(service.files().list(**list_params).execute)
 
     files = results.get("files", [])
     if not files:
@@ -1854,7 +1853,7 @@ async def check_drive_file_public_access(
     file_id = resolved_file_id
 
     # Get detailed permissions
-    file_metadata = await asyncio.to_thread(
+    file_metadata = await greenlet_spawn(
         service.files()
         .get(
             fileId=file_id,
@@ -1868,7 +1867,7 @@ async def check_drive_file_public_access(
     # Shared Drive items do not return inline permissions on files.get(); fall
     # back to permissions.list() so 'anyone with link' surfaces correctly.
     if file_metadata.get("driveId"):
-        permissions = await asyncio.to_thread(list_all_permissions, service, file_id)
+        permissions = await greenlet_spawn(list_all_permissions, service, file_id)
 
     has_public_link = check_public_link_permission(permissions)
 
@@ -2192,7 +2191,7 @@ async def update_drive_file(
             query_params["media_body"] = media
 
         # Perform the update while append/prepend still hold the file lock.
-        updated_file = await asyncio.to_thread(
+        updated_file = await greenlet_spawn(
             service.files().update(**query_params).execute,
             num_retries=GOOGLE_API_WRITE_RETRIES if replacing_content else 0,
         )
@@ -2311,7 +2310,7 @@ async def get_drive_shareable_link(
     resolved_file_id, _ = await resolve_drive_item(service, file_id)
     file_id = resolved_file_id
 
-    file_metadata = await asyncio.to_thread(
+    file_metadata = await greenlet_spawn(
         service.files()
         .get(
             fileId=file_id,
@@ -2473,7 +2472,7 @@ async def manage_drive_access(
             if email_message:
                 create_params["emailMessage"] = email_message
 
-        created_permission = await asyncio.to_thread(
+        created_permission = await greenlet_spawn(
             service.permissions().create(**create_params).execute
         )
 
@@ -2565,7 +2564,7 @@ async def manage_drive_access(
                     r_create_params["emailMessage"] = email_message
 
             try:
-                created_perm = await asyncio.to_thread(
+                created_perm = await greenlet_spawn(
                     service.permissions().create(**r_create_params).execute
                 )
                 results.append(f"  - {format_permission_info(created_perm)}")
@@ -2611,7 +2610,7 @@ async def manage_drive_access(
 
         effective_role = role
         if not effective_role:
-            current_permission = await asyncio.to_thread(
+            current_permission = await greenlet_spawn(
                 service.permissions()
                 .get(
                     fileId=file_id,
@@ -2627,7 +2626,7 @@ async def manage_drive_access(
         if expiration_time:
             update_body["expirationTime"] = expiration_time
 
-        updated_permission = await asyncio.to_thread(
+        updated_permission = await greenlet_spawn(
             service.permissions()
             .update(
                 fileId=file_id,
@@ -2658,7 +2657,7 @@ async def manage_drive_access(
         )
         file_id = resolved_file_id
 
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.permissions()
             .delete(
                 fileId=file_id,
@@ -2695,7 +2694,7 @@ async def manage_drive_access(
         "emailAddress": new_owner_email,
     }
 
-    await asyncio.to_thread(
+    await greenlet_spawn(
         service.permissions()
         .create(
             fileId=file_id,
@@ -2775,7 +2774,7 @@ async def copy_drive_file(
     if resolved_folder_id != "root":
         copy_body["parents"] = [resolved_folder_id]
 
-    copied_file = await asyncio.to_thread(
+    copied_file = await greenlet_spawn(
         service.files()
         .copy(
             fileId=file_id,
@@ -2885,7 +2884,7 @@ async def set_drive_file_permissions(
         )
 
     if file_update_body:
-        await asyncio.to_thread(
+        await greenlet_spawn(
             service.files()
             .update(
                 fileId=file_id,
@@ -2904,7 +2903,7 @@ async def set_drive_file_permissions(
 
     # Handle link sharing via permissions API
     if link_sharing is not None:
-        current_permissions = await asyncio.to_thread(
+        current_permissions = await greenlet_spawn(
             service.permissions()
             .list(
                 fileId=file_id,
@@ -2922,7 +2921,7 @@ async def set_drive_file_permissions(
         if link_sharing == "off":
             if anyone_perms:
                 for perm in anyone_perms:
-                    await asyncio.to_thread(
+                    await greenlet_spawn(
                         service.permissions()
                         .delete(
                             fileId=file_id,
@@ -2938,7 +2937,7 @@ async def set_drive_file_permissions(
                 changes_made.append("  - Link sharing: already off (no change)")
         else:
             if anyone_perms:
-                await asyncio.to_thread(
+                await greenlet_spawn(
                     service.permissions()
                     .update(
                         fileId=file_id,
@@ -2954,7 +2953,7 @@ async def set_drive_file_permissions(
                 )
                 changes_made.append(f"  - Link sharing: updated to '{link_sharing}'")
             else:
-                await asyncio.to_thread(
+                await greenlet_spawn(
                     service.permissions()
                     .create(
                         fileId=file_id,

@@ -6,7 +6,6 @@ in Google Docs, extracting complex logic from the main tools module.
 """
 
 import logging
-import asyncio
 from typing import Any, Optional
 
 from gdocs.docs_helpers import (
@@ -14,6 +13,7 @@ from gdocs.docs_helpers import (
     create_delete_range_request,
     create_insert_text_request,
 )
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ class HeaderFooterManager:
 
     async def _get_document(self, document_id: str) -> dict[str, Any]:
         """Get the full document data."""
-        return await asyncio.to_thread(
+        return await greenlet_spawn(
             self.service.documents()
             .get(documentId=document_id, includeTabsContent=True)
             .execute
@@ -334,7 +334,7 @@ class HeaderFooterManager:
             )
 
         try:
-            await asyncio.to_thread(
+            await greenlet_spawn(
                 self.service.documents()
                 .batchUpdate(documentId=document_id, body={"requests": requests})
                 .execute
@@ -374,7 +374,7 @@ class HeaderFooterManager:
         """Create a missing header/footer and return its new segment ID."""
         request = create_create_header_footer_request(section_type, header_footer_type)
         try:
-            result = await asyncio.to_thread(
+            result = await greenlet_spawn(
                 self.service.documents()
                 .batchUpdate(documentId=document_id, body={"requests": [request]})
                 .execute
@@ -508,7 +508,7 @@ class HeaderFooterManager:
                 batch_request = {"createFooter": request}
 
             # Execute the request
-            await asyncio.to_thread(
+            await greenlet_spawn(
                 self.service.documents()
                 .batchUpdate(documentId=document_id, body={"requests": [batch_request]})
                 .execute

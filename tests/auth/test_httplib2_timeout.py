@@ -1,4 +1,4 @@
-"""Regression tests for Issue #835 httplib2 socket timeout."""
+"""The credentialed transport carries an explicit socket timeout onto the bridge."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -7,46 +7,38 @@ import pytest
 
 from auth.google_auth import _build_authorized_http, get_authenticated_google_service
 from auth.google_auth import get_user_info
+from core.async_bridge import BridgeHttp
 
 
 def test_build_authorized_http_uses_explicit_timeout():
     mock_credentials = MagicMock()
-    mock_http = MagicMock()
-    mock_http.redirect_codes = {300, 301, 302, 303, 307, 308}
     mock_authorized = MagicMock()
 
-    with (
-        patch(
-            "auth.google_auth.httplib2.Http", return_value=mock_http
-        ) as mock_http_cls,
-        patch(
-            "auth.google_auth.google_auth_httplib2.AuthorizedHttp",
-            return_value=mock_authorized,
-        ) as mock_auth_http_cls,
-    ):
+    with patch(
+        "auth.google_auth.google_auth_httplib2.AuthorizedHttp",
+        return_value=mock_authorized,
+    ) as mock_auth_http_cls:
         result = _build_authorized_http(mock_credentials, timeout=42)
 
-    mock_http_cls.assert_called_once_with(timeout=42)
-    mock_auth_http_cls.assert_called_once_with(mock_credentials, http=mock_http)
-    assert mock_http.redirect_codes == {300, 301, 302, 303, 307}
+    mock_auth_http_cls.assert_called_once()
+    args, kwargs = mock_auth_http_cls.call_args
+    assert args == (mock_credentials,)
+    assert isinstance(kwargs["http"], BridgeHttp)
+    assert kwargs["http"].timeout == 42
     assert result is mock_authorized
 
 
 def test_build_authorized_http_default_timeout_is_30():
     mock_credentials = MagicMock()
 
-    with (
-        patch("auth.google_auth.httplib2.Http") as mock_http_cls,
-        patch(
-            "auth.google_auth.google_auth_httplib2.AuthorizedHttp",
-        ) as mock_auth_http_cls,
-    ):
+    with patch(
+        "auth.google_auth.google_auth_httplib2.AuthorizedHttp",
+    ) as mock_auth_http_cls:
         _build_authorized_http(mock_credentials)
 
-    mock_http_cls.assert_called_once_with(timeout=30)
-    mock_auth_http_cls.assert_called_once_with(
-        mock_credentials, http=mock_http_cls.return_value
-    )
+    _, kwargs = mock_auth_http_cls.call_args
+    assert isinstance(kwargs["http"], BridgeHttp)
+    assert kwargs["http"].timeout == 30
 
 
 def test_get_user_info_builds_service_with_authorized_http(monkeypatch):

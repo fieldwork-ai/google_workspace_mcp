@@ -6,7 +6,6 @@ All Google Workspace apps (Docs, Sheets, Slides) use the Drive API for comment o
 """
 
 import logging
-import asyncio
 import os
 from typing import Optional
 
@@ -15,6 +14,7 @@ from mcp.types import ToolAnnotations
 from auth.service_decorator import require_google_service
 from core.server import server
 from core.utils import handle_http_errors
+from core.async_bridge import greenlet_spawn
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +249,7 @@ async def _read_comments_impl(
         if page_token is not None:
             kwargs["pageToken"] = page_token
 
-        response = await asyncio.to_thread(service.comments().list(**kwargs).execute)
+        response = await greenlet_spawn(service.comments().list(**kwargs).execute)
 
         page_comments = response.get("comments", [])
         take = min(len(page_comments), max_comments - len(comments))
@@ -312,7 +312,7 @@ async def _create_comment_impl(
 
     body = {"content": comment_content}
 
-    comment = await asyncio.to_thread(
+    comment = await greenlet_spawn(
         service.comments()
         .create(
             fileId=file_id,
@@ -339,7 +339,7 @@ async def _reply_to_comment_impl(
 
     body = {"content": reply_content}
 
-    reply = await asyncio.to_thread(
+    reply = await greenlet_spawn(
         service.replies()
         .create(
             fileId=file_id,
@@ -367,7 +367,7 @@ async def _resolve_comment_impl(
 
     body = {"content": "This comment has been resolved.", "action": "resolve"}
 
-    reply = await asyncio.to_thread(
+    reply = await greenlet_spawn(
         service.replies()
         .create(
             fileId=file_id,

@@ -4,10 +4,10 @@ Google Slides Helper Functions
 Shared utilities for Google Slides operations.
 """
 
-import asyncio
 from typing import Any, Dict, List, Set, Tuple
 
 from core.utils import UserInputError
+from core.async_bridge import greenlet_spawn
 
 _PRESENTATION_PAGE_ID_FIELDS = (
     "slides(objectId,slideProperties(notesPage(objectId,"
@@ -158,7 +158,7 @@ async def _get_presentation_page_ids(
     lets an insertText aimed at a notes page be redirected to the shape that can
     actually hold the text. See https://developers.google.com/slides/api/guides/notes
     """
-    result = await asyncio.to_thread(
+    result = await greenlet_spawn(
         service.presentations()
         .get(
             presentationId=presentation_id,

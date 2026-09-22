@@ -11,6 +11,7 @@ from googleapiclient.http import MediaIoBaseUpload
 
 from core.utils import UserInputError
 from gdrive.drive_helpers import _stream_url_with_validation
+from core.async_bridge import greenlet_spawn
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 FILE_FIELDS = "id,name,mimeType,size,sha256Checksum,webViewLink,parents,trashed"
@@ -86,7 +87,7 @@ async def upload_file_from_url(
             "file_url must be an HTTPS download URL without user info or fragment."
         )
 
-    folder = await asyncio.to_thread(
+    folder = await greenlet_spawn(
         service.files()
         .get(
             fileId=folder_id,
@@ -120,7 +121,7 @@ async def upload_file_from_url(
     }
     if folder.get("driveId"):
         search["driveId"] = folder["driveId"]
-    existing = await asyncio.to_thread(service.files().list(**search).execute)
+    existing = await greenlet_spawn(service.files().list(**search).execute)
     files = existing.get("files", [])
     if (
         existing.get("incompleteSearch")
@@ -160,7 +161,7 @@ async def upload_file_from_url(
         if size != expected_size or digest.hexdigest() != expected_sha256:
             raise UserInputError("Source size or SHA-256 mismatch; nothing uploaded.")
         await asyncio.to_thread(stream.seek, 0)
-        ids = await asyncio.to_thread(
+        ids = await greenlet_spawn(
             service.files().generateIds(count=1, space="drive").execute
         )
         file_id = ids["ids"][0]
@@ -179,7 +180,7 @@ async def upload_file_from_url(
             supportsAllDrives=True,
         )
         try:
-            await asyncio.to_thread(request.execute, num_retries=0)
+            await greenlet_spawn(request.execute, num_retries=0)
         except HttpError as error:
             if error.resp.status < 500 and error.resp.status != 408:
                 raise
@@ -191,7 +192,7 @@ async def upload_file_from_url(
                 f"Upload outcome unknown. Inspect Drive file {file_id} before retrying."
             ) from None
     try:
-        saved = await asyncio.to_thread(
+        saved = await greenlet_spawn(
             service.files()
             .get(fileId=file_id, fields=FILE_FIELDS, supportsAllDrives=True)
             .execute

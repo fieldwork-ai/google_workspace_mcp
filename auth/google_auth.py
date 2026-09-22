@@ -17,8 +17,9 @@ from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import httplib2
 import google_auth_httplib2
+
+from core.async_bridge import BridgeHttp, greenlet_spawn
 from auth.scopes import SCOPES, get_current_scopes, has_required_scopes  # noqa
 from auth.oauth21_session_store import get_oauth21_session_store
 from auth.credential_store import get_credential_store
@@ -94,11 +95,11 @@ DEFAULT_CREDENTIALS_DIR = get_default_credentials_dir()
 def _build_authorized_http(
     credentials: Credentials, timeout: int = 30
 ) -> google_auth_httplib2.AuthorizedHttp:
-    """Return credentialed HTTP with an explicit socket timeout."""
-    http = httplib2.Http(timeout=timeout)
-    # Drive uses 308 Resume Incomplete with Range during resumable uploads, not a redirect.
-    http.redirect_codes = http.redirect_codes - {308}
-    return google_auth_httplib2.AuthorizedHttp(credentials, http=http)
+    """Return credentialed HTTP on the event-loop bridge, with an explicit
+    socket timeout. Every call through it must be inside `greenlet_spawn`."""
+    return google_auth_httplib2.AuthorizedHttp(
+        credentials, http=BridgeHttp(timeout=timeout)
+    )
 
 
 # Session credentials now handled by OAuth21SessionStore - no local cache needed
@@ -820,7 +821,7 @@ async def handle_auth_callback(
             )
 
         # Get user info to determine user_id (using email here)
-        user_info = await asyncio.to_thread(get_user_info, credentials)
+        user_info = await greenlet_spawn(get_user_info, credentials)
         if not user_info or "email" not in user_info:
             logger.error("Could not retrieve user email from Google.")
             raise ValueError("Failed to get user email for identification.")

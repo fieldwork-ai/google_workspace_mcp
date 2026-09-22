@@ -1,6 +1,5 @@
 """Copy Gmail attachments to Drive without returning their bytes to a client."""
 
-import asyncio
 import base64
 import binascii
 import hashlib
@@ -11,6 +10,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
 from core.utils import UserInputError
+from core.async_bridge import greenlet_spawn
 
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 SOURCE_PROPERTY = "gmailAttachmentSource"
@@ -93,7 +93,7 @@ async def save_attachment_to_drive(
     if file_name is not None and not file_name.strip():
         raise UserInputError("file_name must not be blank.")
 
-    folder = await asyncio.to_thread(
+    folder = await greenlet_spawn(
         drive_service.files()
         .get(
             fileId=folder_id,
@@ -112,7 +112,7 @@ async def save_attachment_to_drive(
         )
     folder_id = folder["id"]
 
-    message = await asyncio.to_thread(
+    message = await greenlet_spawn(
         gmail_service.users()
         .messages()
         .get(userId="me", id=message_id, format="full")
@@ -134,7 +134,7 @@ async def save_attachment_to_drive(
             "Attachments must be uploaded without Google-native conversion."
         )
 
-    attachment = await asyncio.to_thread(
+    attachment = await greenlet_spawn(
         gmail_service.users()
         .messages()
         .attachments()
@@ -179,7 +179,7 @@ async def save_attachment_to_drive(
     }
     if folder.get("driveId"):
         search["driveId"] = folder["driveId"]
-    existing = await asyncio.to_thread(drive_service.files().list(**search).execute)
+    existing = await greenlet_spawn(drive_service.files().list(**search).execute)
     if existing.get("incompleteSearch"):
         raise UserInputError("Drive duplicate lookup was incomplete; nothing uploaded.")
     files = existing.get("files", [])
@@ -192,7 +192,7 @@ async def save_attachment_to_drive(
 
     # A known ID lets a caller reconcile a lost upload response. Search-before-create
     # only deduplicates sequential calls, so the tool must not claim idempotence.
-    ids = await asyncio.to_thread(
+    ids = await greenlet_spawn(
         drive_service.files().generateIds(count=1, space="drive").execute
     )
     file_id = ids["ids"][0]
@@ -213,7 +213,7 @@ async def save_attachment_to_drive(
             supportsAllDrives=True,
         )
         try:
-            await asyncio.to_thread(request.execute, num_retries=0)
+            await greenlet_spawn(request.execute, num_retries=0)
         except HttpError as error:
             if error.resp.status < 500 and error.resp.status != 408:
                 raise
@@ -227,7 +227,7 @@ async def save_attachment_to_drive(
                 "before retrying; it may already have been created."
             ) from None
     try:
-        saved = await asyncio.to_thread(
+        saved = await greenlet_spawn(
             drive_service.files()
             .get(fileId=file_id, fields=FILE_FIELDS, supportsAllDrives=True)
             .execute
