@@ -204,8 +204,12 @@ class BridgeHttp:
         """Called by `service.close()` after every handler. The connection pool
         is shared and outlives any one service, so there is nothing to close."""
 
-    def add_certificate(self, key: Any, cert: Any, domain: Any, password: Any = None) -> None:
-        raise NotImplementedError("client certificates are not supported on the bridge transport")
+    def add_certificate(
+        self, key: Any, cert: Any, domain: Any, password: Any = None
+    ) -> None:
+        raise NotImplementedError(
+            "client certificates are not supported on the bridge transport"
+        )
 
     def request(
         self,

@@ -287,7 +287,9 @@ async def test_a_built_service_executes_and_closes_through_the_bridge(transport)
     document, run a call, and close it, the way a handler does."""
     from googleapiclient.discovery import build
 
-    transport["handlers"].append(lambda r: httpx.Response(200, json={"emailAddress": "user@example.test"}))
+    transport["handlers"].append(
+        lambda r: httpx.Response(200, json={"emailAddress": "user@example.test"})
+    )
 
     def handler():
         service = build("gmail", "v1", http=_authorized())
@@ -298,5 +300,7 @@ async def test_a_built_service_executes_and_closes_through_the_bridge(transport)
 
     assert await greenlet_spawn(handler) == {"emailAddress": "user@example.test"}
     [call] = transport["seen"]
-    assert call["url"].startswith("https://gmail.googleapis.com/gmail/v1/users/me/profile")
+    assert call["url"].startswith(
+        "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+    )
     assert call["thread"] is threading.main_thread()
