@@ -193,6 +193,19 @@ class BridgeHttp:
 
     def __init__(self, timeout: Optional[float] = None) -> None:
         self.timeout = timeout
+        # What httplib2.Http exposes and google_auth_httplib2.AuthorizedHttp
+        # passes through. Redirects are handled in _request; 308 is excluded
+        # for the same reason build_http() excludes it.
+        self.follow_redirects = True
+        self.redirect_codes = frozenset(_FOLLOWED_REDIRECTS)
+        self.connections: dict[str, Any] = {}
+
+    def close(self) -> None:
+        """Called by `service.close()` after every handler. The connection pool
+        is shared and outlives any one service, so there is nothing to close."""
+
+    def add_certificate(self, key: Any, cert: Any, domain: Any, password: Any = None) -> None:
+        raise NotImplementedError("client certificates are not supported on the bridge transport")
 
     def request(
         self,

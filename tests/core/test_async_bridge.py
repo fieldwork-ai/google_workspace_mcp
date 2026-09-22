@@ -278,3 +278,25 @@ async def test_get_redirects_are_followed_but_308_is_returned(transport):
     assert response.status == 308
     assert response["range"] == "bytes=0-3"
     assert len(transport["seen"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_built_service_executes_and_closes_through_the_bridge(transport):
+    """The handlers end every call with `service.close()`, which the client
+    forwards to the transport. Build a real service from the bundled discovery
+    document, run a call, and close it, the way a handler does."""
+    from googleapiclient.discovery import build
+
+    transport["handlers"].append(lambda r: httpx.Response(200, json={"emailAddress": "user@example.test"}))
+
+    def handler():
+        service = build("gmail", "v1", http=_authorized())
+        try:
+            return service.users().getProfile(userId="me").execute()
+        finally:
+            service.close()
+
+    assert await greenlet_spawn(handler) == {"emailAddress": "user@example.test"}
+    [call] = transport["seen"]
+    assert call["url"].startswith("https://gmail.googleapis.com/gmail/v1/users/me/profile")
+    assert call["thread"] is threading.main_thread()
