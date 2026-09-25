@@ -1167,7 +1167,8 @@ async def ensure_session_from_access_token(
             except Exception:  # pragma: no cover - defensive
                 expiry = None
 
-        normalized_expiry = _normalize_expiry_to_naive_utc(expiry)
+        # No expiry: with no refresh token, google-auth would treat the token
+        # as expired 3m45s early and attempt a refresh that can only fail.
         credentials = Credentials(
             token=access_token.token,
             refresh_token=None,
@@ -1175,7 +1176,6 @@ async def ensure_session_from_access_token(
             client_id=client_id,
             client_secret=client_secret,
             scopes=getattr(access_token, "scopes", None),
-            expiry=normalized_expiry,
         )
         store_expiry = expiry
     else:
