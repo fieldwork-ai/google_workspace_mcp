@@ -408,3 +408,26 @@ async def test_ensure_session_falls_back_to_non_refreshable_credential(monkeypat
     assert creds is not None
     assert creds.token == "ya29.direct"
     assert creds.refresh_token is None
+
+
+@pytest.mark.asyncio
+async def test_non_refreshable_credential_stays_valid_near_expiry(monkeypatch):
+    """A token inside google-auth's early-refresh window must still be used:
+    with no refresh token, treating it as expired only fails the call."""
+    monkeypatch.setattr(session_store, "_auth_provider", None)
+    monkeypatch.setattr(
+        session_store,
+        "get_oauth21_session_store",
+        lambda: SimpleNamespace(store_session=lambda **kwargs: None),
+    )
+    access_token = SimpleNamespace(
+        token="ya29.near-expiry",
+        claims={"email": "user@example.com"},
+        scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+        expires_at=int(time.time()) + 60,
+    )
+
+    creds = await ensure_session_from_access_token(access_token, "user@example.com")
+
+    assert creds.expiry is None
+    assert creds.valid
