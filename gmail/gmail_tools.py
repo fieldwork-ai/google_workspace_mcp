@@ -15,7 +15,7 @@ import html
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Optional, List, Dict, Literal, Any, Union
-from urllib.parse import unquote, urlparse, urlunsplit
+from urllib.parse import quote, unquote, urlparse, urlunsplit
 
 from email.message import EmailMessage
 from email.policy import SMTP
@@ -1385,19 +1385,23 @@ def _prepare_gmail_message(
     return raw_message, thread_id, attached_count, attachment_errors
 
 
-def _generate_gmail_web_url(item_id: str, account_index: int = 0) -> str:
+def _generate_gmail_web_url(item_id: str, user_google_email: str) -> str:
     """
     Generate Gmail web interface URL for a message or thread ID.
     Uses #all to access messages from any Gmail folder/label (not just inbox).
 
+    The account is named by email (`authuser`), not by index: `/u/0/` is
+    whichever account the opening browser signed in to first, so a link to a
+    secondary account's message opened the primary inbox instead.
+
     Args:
         item_id: Gmail message ID or thread ID
-        account_index: Google account index (default 0 for primary account)
+        user_google_email: The Google account the message belongs to
 
     Returns:
         Gmail web interface URL that opens the message/thread in Gmail web interface
     """
-    return f"https://mail.google.com/mail/u/{account_index}/#all/{item_id}"
+    return f"https://mail.google.com/mail/u/?authuser={quote(user_google_email, safe='')}#all/{item_id}"
 
 
 async def _fetch_search_result_headers(
@@ -1504,6 +1508,7 @@ async def _fetch_search_result_headers(
 def _format_gmail_results_plain(
     messages: list,
     query: str,
+    user_google_email: str,
     next_page_token: Optional[str] = None,
     headers_by_id: Optional[Dict[str, Optional[Dict[str, str]]]] = None,
 ) -> str:
@@ -1540,12 +1545,12 @@ def _format_gmail_results_plain(
             thread_id = "unknown"
 
         if message_id != "unknown":
-            message_url = _generate_gmail_web_url(message_id)
+            message_url = _generate_gmail_web_url(message_id, user_google_email)
         else:
             message_url = "N/A"
 
         if thread_id != "unknown":
-            thread_url = _generate_gmail_web_url(thread_id)
+            thread_url = _generate_gmail_web_url(thread_id, user_google_email)
         else:
             thread_url = "N/A"
 
@@ -1679,7 +1684,7 @@ async def search_gmail_messages(
             headers_by_id = dict.fromkeys(result_ids)
 
     formatted_output = _format_gmail_results_plain(
-        messages, query, next_page_token, headers_by_id
+        messages, query, user_google_email, next_page_token, headers_by_id
     )
 
     logger.info(f"[search_gmail_messages] Found {len(messages)} messages")
@@ -2001,7 +2006,7 @@ async def get_gmail_messages_content_batch(
                     msg_output = "\n".join(
                         _format_message_header_lines(headers, message_id=mid)
                     )
-                    msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid)}\n"
+                    msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid, user_google_email)}\n"
 
                     output_messages.append(msg_output)
                 else:
@@ -2030,7 +2035,7 @@ async def get_gmail_messages_content_batch(
                     msg_output = "\n".join(
                         _format_message_header_lines(headers, message_id=mid)
                     )
-                    msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid)}\n"
+                    msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid, user_google_email)}\n"
                     msg_output += f"\n--- {body_label} ---\n{body_data}\n"
 
                     if attachments:
