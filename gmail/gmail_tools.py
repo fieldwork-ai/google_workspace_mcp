@@ -2499,7 +2499,7 @@ async def send_gmail_message(
     attachments: Annotated[
         Optional[DictList],
         Field(
-            description='Optional list of attachments. Each can have: "url" (fetch from URL — works with MCP attachment URLs from get_drive_file_download_url / get_gmail_attachment_content), OR "path" (file path, auto-encodes), OR "content" (standard base64, not urlsafe) + "filename". Optional "mime_type". Optional "content_id" (string) makes the attachment inline-rendered: it lands in a multipart/related part with `Content-ID: <content_id>` and `Content-Disposition: inline`, and the HTML body can reference it via `<img src="cid:<content_id>">` (RFC 2392). Without `content_id` the attachment is a regular multipart/mixed attachment. Example: [{"url": "https://host/attachments/abc-123", "filename": "report.pdf"}]',
+            description='Optional list of attachments. Each is one of: "content" (standard base64, not urlsafe) + "filename"; "url" (an HTTPS link this server fetches); or "path" (a file on this server\'s own disk, so not available on a hosted server). For a file in your workspace, base64-encode it in a script and pipe the arguments to `fieldwork tool run <tool> --args -`, so the bytes never pass through the model. Optional "mime_type". Optional "content_id" (string) makes the attachment inline-rendered: it lands in a multipart/related part with `Content-ID: <content_id>` and `Content-Disposition: inline`, and the HTML body can reference it via `<img src="cid:<content_id>">` (RFC 2392). Without `content_id` the attachment is a regular multipart/mixed attachment. Example: [{"content": "<base64>", "filename": "report.pdf"}]',
         ),
     ] = None,
     include_signature: Annotated[
@@ -2539,14 +2539,17 @@ async def send_gmail_message(
         forward_message_id (Optional[str]): Gmail message ID to forward. When set, the tool forwards that message.
         include_forwarded_attachments (bool): Whether to carry over the original attachments when forwarding. Defaults to True.
         attachments (Optional[List[Dict[str, str]]]): Optional list of attachments. Each dict can contain:
-            Option 1 - File path (auto-encodes):
-              - 'path' (required): File path to attach
-              - 'filename' (optional): Override filename
-              - 'mime_type' (optional): Override MIME type (auto-detected if not provided)
-            Option 2 - Base64 content:
+            Option 1 - Base64 content:
               - 'content' (required): Standard base64-encoded file content (not urlsafe)
               - 'filename' (required): Name of the file
               - 'mime_type' (optional): MIME type (defaults to 'application/octet-stream')
+              For a file in your workspace, base64-encode it in a script and pipe the
+              arguments to `fieldwork tool run <tool> --args -`, so the bytes never
+              pass through the model.
+            Option 2 - A file on this server's own disk (not available on a hosted server):
+              - 'path' (required): File path to attach
+              - 'filename' (optional): Override filename
+              - 'mime_type' (optional): Override MIME type (auto-detected if not provided)
         cc (Optional[str]): Optional CC email address.
         bcc (Optional[str]): Optional BCC email address.
         from_name (Optional[str]): Optional sender display name. If provided, the From header will be formatted as 'Name <email>'.
@@ -2608,16 +2611,6 @@ async def send_gmail_message(
             bcc="archive@example.com",
             subject="Project Update",
             body="Here's the latest update..."
-        )
-
-        # Send an email with attachments (using file path)
-        send_gmail_message(
-            to="user@example.com",
-            subject="Report",
-            body="Please see attached report.",
-            attachments=[{
-                "path": "/path/to/report.pdf"
-            }]
         )
 
         # Send an email with attachments (using base64 content)
@@ -3010,7 +3003,7 @@ async def draft_gmail_message(
     attachments: Annotated[
         Optional[DictList],
         Field(
-            description="Optional list of attachments. Each can have: 'url' (fetch from URL — works with MCP attachment URLs from get_drive_file_download_url / get_gmail_attachment_content), OR 'path' (file path, auto-encodes), OR 'content' (standard base64, not urlsafe) + 'filename'. Optional 'mime_type'. Optional 'content_id' (string) makes the attachment inline-rendered: it lands in a multipart/related part with `Content-ID: <content_id>` and `Content-Disposition: inline`, and the HTML body can reference it via `<img src=\"cid:<content_id>\">` (RFC 2392). Without `content_id` the attachment is a regular multipart/mixed attachment.",
+            description="Optional list of attachments. Each is one of: 'content' (standard base64, not urlsafe) + 'filename'; 'url' (an HTTPS link this server fetches); or 'path' (a file on this server's own disk, so not available on a hosted server). For a file in your workspace, base64-encode it in a script and pipe the arguments to `fieldwork tool run <tool> --args -`, so the bytes never pass through the model. Optional 'mime_type'. Optional 'content_id' (string) makes the attachment inline-rendered: it lands in a multipart/related part with `Content-ID: <content_id>` and `Content-Disposition: inline`, and the HTML body can reference it via `<img src=\"cid:<content_id>\">` (RFC 2392). Without `content_id` the attachment is a regular multipart/mixed attachment.",
         ),
     ] = None,
     include_signature: Annotated[
@@ -3052,14 +3045,17 @@ async def draft_gmail_message(
         references (Optional[str]): Optional RFC Message-ID ancestry chain. Normally
             omit when thread_id is provided; the chain is derived automatically.
         attachments (List[Dict[str, str]]): Optional list of attachments. Each dict can contain:
-            Option 1 - File path (auto-encodes):
-              - 'path' (required): File path to attach
-              - 'filename' (optional): Override filename
-              - 'mime_type' (optional): Override MIME type (auto-detected if not provided)
-            Option 2 - Base64 content:
+            Option 1 - Base64 content:
               - 'content' (required): Standard base64-encoded file content (not urlsafe)
               - 'filename' (required): Name of the file
               - 'mime_type' (optional): MIME type (defaults to 'application/octet-stream')
+              For a file in your workspace, base64-encode it in a script and pipe the
+              arguments to `fieldwork tool run <tool> --args -`, so the bytes never
+              pass through the model.
+            Option 2 - A file on this server's own disk (not available on a hosted server):
+              - 'path' (required): File path to attach
+              - 'filename' (optional): Override filename
+              - 'mime_type' (optional): Override MIME type (auto-detected if not provided)
         include_signature (bool): Whether to append Gmail signature HTML from send-as settings.
             When include_signature is true and Gmail signature retrieval fails for benign reasons
             (e.g., missing settings authorization), the draft proceeds with the requested or
