@@ -998,8 +998,8 @@ async def create_drive_file(
         content (Optional[str]): If provided, the content to write to the file.
         folder_id (str): The ID of the parent folder. Defaults to 'root'. For shared drives, this must be a folder ID within the shared drive.
         mime_type (str): The MIME type of the file. Defaults to 'text/plain'.
-        fileUrl (Optional[str]): If provided, fetches the file content from this URL. Supports file://, http://, and https:// protocols.
-        base64_content (Optional[str]): Standard base64-encoded file bytes.
+        fileUrl (Optional[str]): If provided, fetches the file content from this URL. Supports http:// and https://, and file:// for this server's own disk (not available on a hosted server).
+        base64_content (Optional[str]): Standard base64-encoded file bytes. For a file in your workspace, base64-encode it in a script and pipe the arguments to `fieldwork tool run <tool> --args -`, so the bytes never pass through the model.
         content_mime_type (Optional[str]): MIME type for base64_content uploads.
         base64_sha256 (Optional[str]): Expected SHA-256 of decoded base64_content. Recommended for binary payload integrity checks.
 
@@ -1432,7 +1432,7 @@ async def import_to_google_doc(
         user_google_email (str): The user's Google email address. Required.
         file_name (str): The name for the new Google Doc (extension will be ignored).
         content (Optional[str]): Text content for text-based formats. Use only for short snippets or content already in memory.
-        file_path (Optional[str]): Local file path or file:// URL for any supported format (MD, TXT, HTML, DOCX, ODT, RTF). Appropriate for larger files than content, but file_path may still load the file into memory or perform non-streaming reads. Avoid very large files that could exceed memory or time limits; use streaming/chunked uploads or an alternative API for huge files.
+        file_path (Optional[str]): Path or file:// URL of a file on this server's own disk (not available on a hosted server), for any supported format (MD, TXT, HTML, DOCX, ODT, RTF). Appropriate for larger files than content, but file_path may still load the file into memory or perform non-streaming reads. Avoid very large files that could exceed memory or time limits; use streaming/chunked uploads or an alternative API for huge files.
         file_url (Optional[str]): Remote URL to fetch the file from (http/https).
         source_format (Optional[str]): Source format hint ('md', 'markdown', 'docx', 'txt', 'html', 'rtf', 'odt').
                                        Auto-detected from file_name extension if not provided.
@@ -1509,7 +1509,7 @@ async def import_to_google_slides(
     Args:
         user_google_email (str): The user's Google email address. Required.
         file_name (str): The name for the new Google Slides presentation (extension will be ignored).
-        file_path (Optional[str]): Local file path or file:// URL for any supported format (PPTX, PPT, ODP). Appropriate for larger files than content, but file_path may still load the file into memory or perform non-streaming reads. Avoid very large files that could exceed memory or time limits; use streaming/chunked uploads or an alternative API for huge files.
+        file_path (Optional[str]): Path or file:// URL of a file on this server's own disk (not available on a hosted server), for any supported format (PPTX, PPT, ODP). Appropriate for larger files than content, but file_path may still load the file into memory or perform non-streaming reads. Avoid very large files that could exceed memory or time limits; use streaming/chunked uploads or an alternative API for huge files.
         file_url (Optional[str]): Remote URL to fetch the presentation from (http/https).
         source_format (Optional[str]): Source format hint ('pptx', 'ppt', 'odp').
                                        Auto-detected from file_name extension if not provided.
@@ -1582,7 +1582,7 @@ async def import_to_google_sheets(
         user_google_email (str): The user's Google email address. Required.
         file_name (str): The name for the new Google Sheets spreadsheet (extension will be ignored).
         content (Optional[str]): Text content for text-based formats (CSV, TSV). Use only for short snippets or content already in memory.
-        file_path (Optional[str]): Local file path or file:// URL for any supported format (XLSX, XLS, ODS, CSV, TSV). Appropriate for larger files than content, but file_path may still load the file into memory or perform non-streaming reads. Avoid very large files that could exceed memory or time limits; use streaming/chunked uploads or an alternative API for huge files.
+        file_path (Optional[str]): Path or file:// URL of a file on this server's own disk (not available on a hosted server), for any supported format (XLSX, XLS, ODS, CSV, TSV). Appropriate for larger files than content, but file_path may still load the file into memory or perform non-streaming reads. Avoid very large files that could exceed memory or time limits; use streaming/chunked uploads or an alternative API for huge files.
         file_url (Optional[str]): Remote URL to fetch the spreadsheet from (http/https).
         source_format (Optional[str]): Source format hint ('xlsx', 'xls', 'ods', 'csv', 'tsv').
                                        Auto-detected from file_name extension if not provided.
@@ -1977,7 +1977,7 @@ async def update_drive_file(
             shortcut resource.
         properties (Optional[dict]): Custom key-value properties for the file.
         content (Optional[str]): New text content for text-based formats (markdown, TXT, HTML).
-        file_path (Optional[str]): Local file path for binary formats (DOCX, ODT). Supports file:// URLs.
+        file_path (Optional[str]): Path or file:// URL of a file on this server's own disk (not available on a hosted server), for binary formats (DOCX, ODT).
         file_url (Optional[str]): Remote http(s) URL to fetch new content from.
         source_format (Optional[str]): Source format hint for conversion
             (md, markdown, docx, txt, html, rtf, odt). Auto-detected when omitted, and

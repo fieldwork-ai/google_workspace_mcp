@@ -168,6 +168,15 @@ def _get_allowed_file_dirs() -> list[Path]:
     return unique_dirs
 
 
+HOSTED_LOCAL_FILE_REFUSAL = (
+    "This server is hosted and does not read local files, from your workspace or "
+    "its own disk. Send the file's bytes as base64 instead (Gmail attachments: "
+    "'content'; create_drive_file: 'base64_content'). For a file in your workspace, "
+    "base64-encode it in a script and pipe the arguments to "
+    "`fieldwork tool run <tool> --args -`, so the bytes never pass through the model."
+)
+
+
 def validate_file_path(file_path: str) -> Path:
     """
     Validate that a file path is safe to read from the server filesystem.
@@ -186,6 +195,15 @@ def validate_file_path(file_path: str) -> Path:
         ValueError: If the path is outside allowed directories or targets
                     a sensitive location.
     """
+    from auth.oauth_config import is_stateless_mode
+
+    # A hosted server shares no disk with its callers, and its own disk is not
+    # theirs to read: a path from a caller's workspace can never resolve here.
+    # Refused before anything is resolved, so a reply says nothing about what
+    # exists on this server.
+    if is_stateless_mode():
+        raise UserInputError(HOSTED_LOCAL_FILE_REFUSAL)
+
     resolved = Path(file_path).resolve()
 
     if not resolved.exists():
