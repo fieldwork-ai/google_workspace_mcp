@@ -74,6 +74,7 @@ from gmail.gmail_helpers import (
 )
 from gmail.attachment_transfer import save_attachment_to_drive
 from core.async_bridge import greenlet_spawn
+from core.lean_batch import new_lean_batch
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,54 @@ GMAIL_SEARCH_HEADER_BATCH_SIZE = 10
 GMAIL_REQUEST_DELAY = 0.1
 GMAIL_RATE_LIMIT_BACKOFF = 2.0
 HTML_BODY_TRUNCATE_LIMIT = 20000
+# A content read's output, all items together. Past it, items are listed for
+# another call rather than formatted into one ever-larger string.
+GMAIL_CONTENT_OUTPUT_CHAR_LIMIT = 500_000
+
+
+class _OutputBudget:
+    """Caps a content read's total output.
+
+    An item that does not fit is withheld for the caller to request again, and
+    so is everything after it. The first item is shortened instead, so every
+    call returns something.
+    """
+
+    def __init__(self, limit: int):
+        self.remaining = limit
+        self.kept = 0
+        self.withheld: List[str] = []
+
+    @property
+    def exhausted(self) -> bool:
+        return bool(self.withheld) or self.remaining <= 0
+
+    def take(self, item_id: str, text: str) -> Optional[str]:
+        if not self.withheld and len(text) <= self.remaining:
+            self.remaining -= len(text)
+            self.kept += 1
+            return text
+        if self.kept == 0:
+            self.kept = 1
+            shortened = text[: self.remaining]
+            self.remaining = 0
+            return shortened + "\n\n[Content truncated: output limit reached]"
+        self.withheld.append(item_id)
+        return None
+
+    def header(self, total: int, noun: str) -> str:
+        if not self.withheld:
+            return f"Retrieved {total} {noun}:"
+        return f"Retrieved {total - len(self.withheld)} of {total} {noun}:"
+
+    def note(self, noun: str) -> str:
+        if not self.withheld:
+            return ""
+        return (
+            f"\n\n[Output limit reached: {len(self.withheld)} {noun} not retrieved. "
+            f"Request them in another call: {', '.join(self.withheld)}]"
+        )
+
 
 # Keep ``None`` valid at runtime without publishing it as an ``anyOf`` branch.
 # Cowork needs a top-level array schema, while Moonshot rejects the previous
@@ -272,7 +321,7 @@ def _format_body_content(
             content = content[:HTML_BODY_TRUNCATE_LIMIT] + "\n\n[Content truncated...]"
         return content
     elif text_stripped:
-        return text_body
+        return _truncate_content(text_body, HTML_BODY_TRUNCATE_LIMIT)
     else:
         return "[No readable content found]"
 
@@ -1431,7 +1480,7 @@ async def _fetch_search_result_headers(
             results[request_id] = {"data": response, "error": exception}
 
         try:
-            batch = service.new_batch_http_request(callback=_batch_callback)
+            batch = new_lean_batch(service, _batch_callback)
             for mid in chunk_ids:
                 batch.add(
                     _build_message_get_request(
@@ -1883,6 +1932,8 @@ async def get_gmail_messages_content_batch(
     """
     Retrieves the content of multiple Gmail messages in a single batch request.
     Supports up to 25 messages per batch to prevent SSL connection exhaustion.
+    A call's output is limited in size; messages that do not fit are listed at
+    the end so they can be requested in another call.
 
     Args:
         message_ids (List[str]): List of Gmail message IDs to retrieve (max 25 per batch).
@@ -1905,6 +1956,13 @@ async def get_gmail_messages_content_batch(
     _validate_message_batch_options(format, body_format)
 
     output_messages = []
+    budget = _OutputBudget(GMAIL_CONTENT_OUTPUT_CHAR_LIMIT)
+
+    def _keep(item_id, text):
+        kept = budget.take(item_id, text)
+        if kept is not None:
+            output_messages.append(kept)
+
     message_format: Literal["metadata", "full"] = (
         "metadata" if format == "metadata" or body_format == "raw" else "full"
     )
@@ -1912,6 +1970,9 @@ async def get_gmail_messages_content_batch(
     # Process in smaller chunks to prevent SSL connection exhaustion
     for chunk_start in range(0, len(message_ids), GMAIL_BATCH_SIZE):
         chunk_ids = message_ids[chunk_start : chunk_start + GMAIL_BATCH_SIZE]
+        if budget.exhausted:
+            budget.withheld.extend(chunk_ids)
+            continue
         results: Dict[str, Dict] = {}
 
         def _batch_callback(request_id, response, exception):
@@ -1922,7 +1983,7 @@ async def get_gmail_messages_content_batch(
 
         # Try to use batch API
         try:
-            batch = service.new_batch_http_request(callback=_batch_callback)
+            batch = new_lean_batch(service, _batch_callback)
 
             for mid in chunk_ids:
                 req = _build_message_get_request(
@@ -1988,14 +2049,17 @@ async def get_gmail_messages_content_batch(
 
         # Process results for this chunk
         for mid in chunk_ids:
+            if budget.exhausted:
+                budget.withheld.append(mid)
+                continue
             entry = results.get(mid, {"data": None, "error": "No result"})
 
             if entry["error"]:
-                output_messages.append(f"⚠️ Message {mid}: {entry['error']}\n")
+                _keep(mid, f"⚠️ Message {mid}: {entry['error']}\n")
             else:
                 message = entry["data"]
                 if not message:
-                    output_messages.append(f"⚠️ Message {mid}: No data returned\n")
+                    _keep(mid, f"⚠️ Message {mid}: No data returned\n")
                     continue
 
                 # Extract content based on format
@@ -2008,7 +2072,7 @@ async def get_gmail_messages_content_batch(
                     )
                     msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid, user_google_email)}\n"
 
-                    output_messages.append(msg_output)
+                    _keep(mid, msg_output)
                 else:
                     headers = _extract_headers(payload, GMAIL_METADATA_HEADERS)
                     if body_format == "raw":
@@ -2049,11 +2113,12 @@ async def get_gmail_messages_content_batch(
                                 f"   Use get_gmail_attachment_content(message_id='{mid}', attachment_id='{att['attachmentId']}') to download\n"
                             )
 
-                    output_messages.append(msg_output)
+                    _keep(mid, msg_output)
 
     # Combine all messages with separators
-    final_output = f"Retrieved {len(message_ids)} messages:\n\n"
+    final_output = budget.header(len(message_ids), "messages") + "\n\n"
     final_output += "\n---\n\n".join(output_messages)
+    final_output += budget.note("messages")
 
     return final_output
 
@@ -3377,11 +3442,14 @@ async def get_gmail_thread_content(
             service, message_ids, log_prefix="get_gmail_thread_content"
         )
 
-    content = _format_thread_content(
-        thread_response,
+    content = _OutputBudget(GMAIL_CONTENT_OUTPUT_CHAR_LIMIT).take(
         thread_id,
-        body_format=body_format,
-        raw_contents=raw_contents,
+        _format_thread_content(
+            thread_response,
+            thread_id,
+            body_format=body_format,
+            raw_contents=raw_contents,
+        ),
     )
 
     if not include_analysis:
@@ -3423,6 +3491,8 @@ async def get_gmail_threads_content_batch(
     """
     Retrieves the content of multiple Gmail threads in a single batch request.
     Supports up to 25 threads per batch to prevent SSL connection exhaustion.
+    A call's output is limited in size; threads that do not fit are listed at
+    the end so they can be requested in another call.
 
     Args:
         thread_ids (List[str]): A list of Gmail thread IDs to retrieve. The function will automatically batch requests in chunks of 25.
@@ -3443,6 +3513,12 @@ async def get_gmail_threads_content_batch(
         raise ValueError("No thread IDs provided")
 
     output_threads = []
+    budget = _OutputBudget(GMAIL_CONTENT_OUTPUT_CHAR_LIMIT)
+
+    def _keep(item_id, text):
+        kept = budget.take(item_id, text)
+        if kept is not None:
+            output_threads.append(kept)
 
     def _batch_callback(request_id, response, exception):
         """Callback for batch requests"""
@@ -3451,13 +3527,16 @@ async def get_gmail_threads_content_batch(
     # Process in smaller chunks to prevent SSL connection exhaustion
     for chunk_start in range(0, len(thread_ids), GMAIL_BATCH_SIZE):
         chunk_ids = thread_ids[chunk_start : chunk_start + GMAIL_BATCH_SIZE]
+        if budget.exhausted:
+            budget.withheld.extend(chunk_ids)
+            continue
         results: Dict[str, Dict] = {}
 
         batch_completed = False
 
         # Try to use batch API
         try:
-            batch = service.new_batch_http_request(callback=_batch_callback)
+            batch = new_lean_batch(service, _batch_callback)
 
             for tid in chunk_ids:
                 req = service.users().threads().get(userId="me", id=tid, format="full")
@@ -3507,14 +3586,17 @@ async def get_gmail_threads_content_batch(
 
         # Process results for this chunk
         for tid in chunk_ids:
+            if budget.exhausted:
+                budget.withheld.append(tid)
+                continue
             entry = results.get(tid, {"data": None, "error": "No result"})
 
             if entry["error"]:
-                output_threads.append(f"⚠️ Thread {tid}: {entry['error']}\n")
+                _keep(tid, f"⚠️ Thread {tid}: {entry['error']}\n")
             else:
                 thread = entry["data"]
                 if not thread:
-                    output_threads.append(f"⚠️ Thread {tid}: No data returned\n")
+                    _keep(tid, f"⚠️ Thread {tid}: No data returned\n")
                     continue
 
                 raw_contents = None
@@ -3530,18 +3612,19 @@ async def get_gmail_threads_content_batch(
                         log_prefix="get_gmail_threads_content_batch",
                     )
 
-                output_threads.append(
+                _keep(
+                    tid,
                     _format_thread_content(
                         thread,
                         tid,
                         body_format=body_format,
                         raw_contents=raw_contents,
-                    )
+                    ),
                 )
 
     # Combine all threads with separators
-    header = f"Retrieved {len(thread_ids)} threads:"
-    return header + "\n\n" + "\n---\n\n".join(output_threads)
+    header = budget.header(len(thread_ids), "threads")
+    return header + "\n\n" + "\n---\n\n".join(output_threads) + budget.note("threads")
 
 
 @server.tool(
@@ -3985,7 +4068,7 @@ async def _verify_batch_label_changes(
             results[request_id] = {"data": response, "error": exception}
 
         try:
-            batch = service.new_batch_http_request(callback=_batch_callback)
+            batch = new_lean_batch(service, _batch_callback)
             for mid in chunk_ids:
                 batch.add(
                     service.users()
