@@ -12,6 +12,7 @@ import json
 import re
 import mimetypes
 import html
+from contextlib import asynccontextmanager
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Optional, List, Dict, Literal, Any, Union
@@ -85,6 +86,74 @@ GMAIL_SEARCH_HEADER_BATCH_SIZE = 10
 GMAIL_REQUEST_DELAY = 0.1
 GMAIL_RATE_LIMIT_BACKOFF = 2.0
 HTML_BODY_TRUNCATE_LIMIT = 20000
+
+# A full-content read holds Gmail's whole response in memory while it is
+# formatted. One account's parallel reads of 25 full threads at a time once
+# exhausted the server's memory and took it down for every account, so full
+# content is fetched in small chunks, a call's output has a budget, and
+# content reads queue per account and per process.
+GMAIL_THREAD_BATCH_SIZE = 5
+GMAIL_FULL_MESSAGE_BATCH_SIZE = 10
+GMAIL_CONTENT_OUTPUT_CHAR_LIMIT = 500_000
+GMAIL_CONTENT_READS_PER_ACCOUNT = 2
+GMAIL_CONTENT_READS_PER_PROCESS = 6
+
+_content_reads = asyncio.Semaphore(GMAIL_CONTENT_READS_PER_PROCESS)
+_account_content_reads: Dict[str, asyncio.Semaphore] = {}
+
+
+@asynccontextmanager
+async def _content_read_slot(user_google_email: str):
+    """Hold one content-read slot for the account, then one for the process."""
+    account = _account_content_reads.setdefault(
+        user_google_email.lower(),
+        asyncio.Semaphore(GMAIL_CONTENT_READS_PER_ACCOUNT),
+    )
+    async with account, _content_reads:
+        yield
+
+
+class _OutputBudget:
+    """Caps a content read's total output.
+
+    An item that does not fit is withheld for the caller to request again,
+    except the first, which is shortened so every call returns something.
+    """
+
+    def __init__(self, limit: int):
+        self.remaining = limit
+        self.kept = 0
+        self.withheld: List[str] = []
+
+    @property
+    def exhausted(self) -> bool:
+        # Once an item is withheld, so is everything after it: the caller gets
+        # a contiguous prefix and one list to request next.
+        return self.remaining <= 0 or bool(self.withheld)
+
+    def take(self, item_id: str, text: str) -> Optional[str]:
+        if len(text) <= self.remaining:
+            self.remaining -= len(text)
+            self.kept += 1
+            return text
+        if self.kept == 0:
+            shortened = (
+                text[: self.remaining] + "\n\n[Content truncated: output limit reached]"
+            )
+            self.remaining = 0
+            self.kept = 1
+            return shortened
+        self.withheld.append(item_id)
+        return None
+
+    def note(self, noun: str) -> str:
+        if not self.withheld:
+            return ""
+        return (
+            f"\n\n[Output limit reached: {len(self.withheld)} {noun} not retrieved. "
+            f"Request them in another call: {', '.join(self.withheld)}]"
+        )
+
 
 # Keep ``None`` valid at runtime without publishing it as an ``anyOf`` branch.
 # Cowork needs a top-level array schema, while Moonshot rejects the previous
@@ -272,7 +341,7 @@ def _format_body_content(
             content = content[:HTML_BODY_TRUNCATE_LIMIT] + "\n\n[Content truncated...]"
         return content
     elif text_stripped:
-        return text_body
+        return _truncate_content(text_body, HTML_BODY_TRUNCATE_LIMIT)
     else:
         return "[No readable content found]"
 
@@ -1881,11 +1950,12 @@ async def get_gmail_messages_content_batch(
     ] = "text",
 ) -> str:
     """
-    Retrieves the content of multiple Gmail messages in a single batch request.
-    Supports up to 25 messages per batch to prevent SSL connection exhaustion.
+    Retrieves the content of multiple Gmail messages.
+    A call's output is limited in size; messages that do not fit are listed at
+    the end so they can be requested in another call.
 
     Args:
-        message_ids (List[str]): List of Gmail message IDs to retrieve (max 25 per batch).
+        message_ids (List[str]): List of Gmail message IDs to retrieve.
         user_google_email (str): The user's Google email address. Required.
         format (Literal["full", "metadata"]): Message format. "full" includes body, "metadata" only headers.
         body_format (Literal["text", "html", "raw"]): Body output format (only applies when format='full').
@@ -1905,155 +1975,168 @@ async def get_gmail_messages_content_batch(
     _validate_message_batch_options(format, body_format)
 
     output_messages = []
+    budget = _OutputBudget(GMAIL_CONTENT_OUTPUT_CHAR_LIMIT)
     message_format: Literal["metadata", "full"] = (
         "metadata" if format == "metadata" or body_format == "raw" else "full"
     )
+    chunk_size = (
+        GMAIL_BATCH_SIZE if format == "metadata" else GMAIL_FULL_MESSAGE_BATCH_SIZE
+    )
 
-    # Process in smaller chunks to prevent SSL connection exhaustion
-    for chunk_start in range(0, len(message_ids), GMAIL_BATCH_SIZE):
-        chunk_ids = message_ids[chunk_start : chunk_start + GMAIL_BATCH_SIZE]
+    for chunk_start in range(0, len(message_ids), chunk_size):
+        chunk_ids = message_ids[chunk_start : chunk_start + chunk_size]
+        if budget.exhausted:
+            budget.withheld.extend(chunk_ids)
+            continue
         results: Dict[str, Dict] = {}
 
         def _batch_callback(request_id, response, exception):
             """Callback for batch requests"""
             results[request_id] = {"data": response, "error": exception}
 
-        batch_completed = False
+        async with _content_read_slot(user_google_email):
+            batch_completed = False
 
-        # Try to use batch API
-        try:
-            batch = service.new_batch_http_request(callback=_batch_callback)
+            # Try to use batch API
+            try:
+                batch = service.new_batch_http_request(callback=_batch_callback)
 
-            for mid in chunk_ids:
-                req = _build_message_get_request(
-                    service, message_id=mid, message_format=message_format
+                for mid in chunk_ids:
+                    req = _build_message_get_request(
+                        service, message_id=mid, message_format=message_format
+                    )
+                    batch.add(req, request_id=mid)
+
+                # Execute batch request
+                await greenlet_spawn(batch.execute)
+                batch_completed = True
+
+            except Exception as batch_error:
+                # Fallback to sequential processing instead of parallel to prevent SSL exhaustion
+                logger.warning(
+                    f"[get_gmail_messages_content_batch] Batch API failed, falling back to sequential processing: {batch_error}"
                 )
-                batch.add(req, request_id=mid)
 
-            # Execute batch request
-            await greenlet_spawn(batch.execute)
-            batch_completed = True
+                # Process messages sequentially with small delays to prevent connection exhaustion
+                for mid in chunk_ids:
+                    mid_result, msg_data, error = await _fetch_message_with_retry(
+                        service,
+                        message_id=mid,
+                        message_format=message_format,
+                        log_prefix="get_gmail_messages_content_batch",
+                    )
+                    results[mid_result] = {"data": msg_data, "error": error}
+                    # Brief delay between requests to allow connection cleanup
+                    await asyncio.sleep(GMAIL_REQUEST_DELAY)
 
-        except Exception as batch_error:
-            # Fallback to sequential processing instead of parallel to prevent SSL exhaustion
-            logger.warning(
-                f"[get_gmail_messages_content_batch] Batch API failed, falling back to sequential processing: {batch_error}"
+            # Sub-requests that failed with a transient error (e.g. 429 rate limit)
+            # inside an otherwise successful batch response: re-fetch only those IDs
+            # and merge. The sequential fallback has already exhausted its retries.
+            retryable_ids = (
+                _retryable_result_ids(results, chunk_ids) if batch_completed else []
             )
+            if retryable_ids:
+                logger.warning(
+                    f"[get_gmail_messages_content_batch] {len(retryable_ids)}/{len(chunk_ids)} "
+                    f"messages failed with retryable errors; re-fetching: {retryable_ids}"
+                )
+                # Backoff briefly so the rate limit has time to reset.
+                await asyncio.sleep(GMAIL_RATE_LIMIT_BACKOFF)
+                for mid in retryable_ids:
+                    mid_result, msg_data, error = await _fetch_message_with_retry(
+                        service,
+                        message_id=mid,
+                        message_format=message_format,
+                        log_prefix="get_gmail_messages_content_batch",
+                    )
+                    results[mid_result] = {"data": msg_data, "error": error}
+                    await asyncio.sleep(GMAIL_REQUEST_DELAY)
 
-            # Process messages sequentially with small delays to prevent connection exhaustion
-            for mid in chunk_ids:
-                mid_result, msg_data, error = await _fetch_message_with_retry(
+            raw_contents: Optional[Dict[str, str]] = None
+            if format != "metadata" and body_format == "raw":
+                raw_message_ids = [
+                    mid for mid in chunk_ids if not results.get(mid, {}).get("error")
+                ]
+                raw_contents = await _fetch_raw_message_contents(
                     service,
-                    message_id=mid,
-                    message_format=message_format,
+                    raw_message_ids,
                     log_prefix="get_gmail_messages_content_batch",
                 )
-                results[mid_result] = {"data": msg_data, "error": error}
-                # Brief delay between requests to allow connection cleanup
-                await asyncio.sleep(GMAIL_REQUEST_DELAY)
 
-        # Sub-requests that failed with a transient error (e.g. 429 rate limit)
-        # inside an otherwise successful batch response: re-fetch only those IDs
-        # and merge. The sequential fallback has already exhausted its retries.
-        retryable_ids = (
-            _retryable_result_ids(results, chunk_ids) if batch_completed else []
-        )
-        if retryable_ids:
-            logger.warning(
-                f"[get_gmail_messages_content_batch] {len(retryable_ids)}/{len(chunk_ids)} "
-                f"messages failed with retryable errors; re-fetching: {retryable_ids}"
-            )
-            # Backoff briefly so the rate limit has time to reset.
-            await asyncio.sleep(GMAIL_RATE_LIMIT_BACKOFF)
-            for mid in retryable_ids:
-                mid_result, msg_data, error = await _fetch_message_with_retry(
-                    service,
-                    message_id=mid,
-                    message_format=message_format,
-                    log_prefix="get_gmail_messages_content_batch",
-                )
-                results[mid_result] = {"data": msg_data, "error": error}
-                await asyncio.sleep(GMAIL_REQUEST_DELAY)
-
-        raw_contents: Optional[Dict[str, str]] = None
-        if format != "metadata" and body_format == "raw":
-            raw_message_ids = [
-                mid for mid in chunk_ids if not results.get(mid, {}).get("error")
-            ]
-            raw_contents = await _fetch_raw_message_contents(
-                service,
-                raw_message_ids,
-                log_prefix="get_gmail_messages_content_batch",
-            )
-
-        # Process results for this chunk
-        for mid in chunk_ids:
-            entry = results.get(mid, {"data": None, "error": "No result"})
-
-            if entry["error"]:
-                output_messages.append(f"⚠️ Message {mid}: {entry['error']}\n")
-            else:
-                message = entry["data"]
-                if not message:
-                    output_messages.append(f"⚠️ Message {mid}: No data returned\n")
+            # Process results for this chunk
+            for mid in chunk_ids:
+                if budget.exhausted:
+                    budget.withheld.append(mid)
                     continue
+                entry = results.get(mid, {"data": None, "error": "No result"})
 
-                # Extract content based on format
-                payload = message.get("payload", {})
-
-                if format == "metadata":
-                    headers = _extract_headers(payload, GMAIL_METADATA_HEADERS)
-                    msg_output = "\n".join(
-                        _format_message_header_lines(headers, message_id=mid)
-                    )
-                    msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid, user_google_email)}\n"
-
-                    output_messages.append(msg_output)
+                if entry["error"]:
+                    msg_output = f"⚠️ Message {mid}: {entry['error']}\n"
+                elif not entry["data"]:
+                    msg_output = f"⚠️ Message {mid}: No data returned\n"
                 else:
+                    message = entry["data"]
+                    # Extract content based on format
+                    payload = message.get("payload", {})
                     headers = _extract_headers(payload, GMAIL_METADATA_HEADERS)
-                    if body_format == "raw":
-                        body_data = (
-                            raw_contents.get(
-                                mid, "[Failed to fetch raw MIME: No result]"
-                            )
-                            if raw_contents
-                            else "[Failed to fetch raw MIME: No result]"
+
+                    if format == "metadata":
+                        msg_output = "\n".join(
+                            _format_message_header_lines(headers, message_id=mid)
                         )
-                        body_label = "RAW MIME"
+                        msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid, user_google_email)}\n"
                     else:
-                        # Full format - extract body too
-                        bodies = _extract_message_bodies(payload)
-                        text_body = bodies.get("text", "")
-                        html_body = bodies.get("html", "")
-                        body_data = _format_body_content(
-                            text_body, html_body, body_format=body_format
-                        )
-                        body_label = "BODY"
-
-                    attachments = _extract_attachments(payload)
-
-                    msg_output = "\n".join(
-                        _format_message_header_lines(headers, message_id=mid)
-                    )
-                    msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid, user_google_email)}\n"
-                    msg_output += f"\n--- {body_label} ---\n{body_data}\n"
-
-                    if attachments:
-                        msg_output += "\n--- ATTACHMENTS ---\n"
-                        for i, att in enumerate(attachments, 1):
-                            size_kb = att["size"] / 1024
-                            msg_output += (
-                                f"{i}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
-                                f"   Part ID: {att['partId']} (use as part_id when saving to Drive)\n"
-                                f"   Attachment ID: {att['attachmentId']}\n"
-                                f"   Use get_gmail_attachment_content(message_id='{mid}', attachment_id='{att['attachmentId']}') to download\n"
+                        if body_format == "raw":
+                            body_data = (
+                                raw_contents.get(
+                                    mid, "[Failed to fetch raw MIME: No result]"
+                                )
+                                if raw_contents
+                                else "[Failed to fetch raw MIME: No result]"
                             )
+                            body_label = "RAW MIME"
+                        else:
+                            # Full format - extract body too
+                            bodies = _extract_message_bodies(payload)
+                            text_body = bodies.get("text", "")
+                            html_body = bodies.get("html", "")
+                            body_data = _format_body_content(
+                                text_body, html_body, body_format=body_format
+                            )
+                            body_label = "BODY"
 
-                    output_messages.append(msg_output)
+                        attachments = _extract_attachments(payload)
+
+                        msg_output = "\n".join(
+                            _format_message_header_lines(headers, message_id=mid)
+                        )
+                        msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid, user_google_email)}\n"
+                        msg_output += f"\n--- {body_label} ---\n{body_data}\n"
+
+                        if attachments:
+                            msg_output += "\n--- ATTACHMENTS ---\n"
+                            for i, att in enumerate(attachments, 1):
+                                size_kb = att["size"] / 1024
+                                msg_output += (
+                                    f"{i}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
+                                    f"   Part ID: {att['partId']} (use as part_id when saving to Drive)\n"
+                                    f"   Attachment ID: {att['attachmentId']}\n"
+                                    f"   Use get_gmail_attachment_content(message_id='{mid}', attachment_id='{att['attachmentId']}') to download\n"
+                                )
+
+                kept = budget.take(mid, msg_output)
+                if kept is not None:
+                    output_messages.append(kept)
 
     # Combine all messages with separators
-    final_output = f"Retrieved {len(message_ids)} messages:\n\n"
+    retrieved = len(message_ids) - len(budget.withheld)
+    final_output = (
+        f"Retrieved {retrieved} of {len(message_ids)} messages:\n\n"
+        if budget.withheld
+        else f"Retrieved {len(message_ids)} messages:\n\n"
+    )
     final_output += "\n---\n\n".join(output_messages)
+    final_output += budget.note("messages")
 
     return final_output
 
@@ -3361,34 +3444,41 @@ async def get_gmail_thread_content(
         f"Email: '{user_google_email}', include_analysis={include_analysis}"
     )
 
-    # Fetch the complete thread with all messages
-    thread_response = await greenlet_spawn(
-        service.users().threads().get(userId="me", id=thread_id, format="full").execute
-    )
-
-    raw_contents = None
-    if body_format == "raw":
-        message_ids = [
-            message["id"]
-            for message in thread_response.get("messages", [])
-            if message.get("id")
-        ]
-        raw_contents = await _fetch_raw_message_contents(
-            service, message_ids, log_prefix="get_gmail_thread_content"
+    async with _content_read_slot(user_google_email):
+        # Fetch the complete thread with all messages
+        thread_response = await greenlet_spawn(
+            service.users()
+            .threads()
+            .get(userId="me", id=thread_id, format="full")
+            .execute
         )
 
-    content = _format_thread_content(
-        thread_response,
-        thread_id,
-        body_format=body_format,
-        raw_contents=raw_contents,
-    )
+        raw_contents = None
+        if body_format == "raw":
+            message_ids = [
+                message["id"]
+                for message in thread_response.get("messages", [])
+                if message.get("id")
+            ]
+            raw_contents = await _fetch_raw_message_contents(
+                service, message_ids, log_prefix="get_gmail_thread_content"
+            )
 
-    if not include_analysis:
-        return content
+        content = _OutputBudget(GMAIL_CONTENT_OUTPUT_CHAR_LIMIT).take(
+            thread_id,
+            _format_thread_content(
+                thread_response,
+                thread_id,
+                body_format=body_format,
+                raw_contents=raw_contents,
+            ),
+        )
 
-    analysis = _analyze_thread_ownership_impl(thread_response, user_google_email)
-    return {"content": content, "analysis": analysis}
+        if not include_analysis:
+            return content
+
+        analysis = _analyze_thread_ownership_impl(thread_response, user_google_email)
+        return {"content": content, "analysis": analysis}
 
 
 @server.tool(
@@ -3421,11 +3511,12 @@ async def get_gmail_threads_content_batch(
     ] = "text",
 ) -> str:
     """
-    Retrieves the content of multiple Gmail threads in a single batch request.
-    Supports up to 25 threads per batch to prevent SSL connection exhaustion.
+    Retrieves the content of multiple Gmail threads.
+    A call's output is limited in size; threads that do not fit are listed at
+    the end so they can be requested in another call.
 
     Args:
-        thread_ids (List[str]): A list of Gmail thread IDs to retrieve. The function will automatically batch requests in chunks of 25.
+        thread_ids (List[str]): A list of Gmail thread IDs to retrieve.
         user_google_email (str): The user's Google email address. Required.
         body_format (Literal["text", "html", "raw"]): Body output format.
             "text" (default) returns plaintext (HTML converted to text as fallback).
@@ -3443,105 +3534,120 @@ async def get_gmail_threads_content_batch(
         raise ValueError("No thread IDs provided")
 
     output_threads = []
+    budget = _OutputBudget(GMAIL_CONTENT_OUTPUT_CHAR_LIMIT)
 
     def _batch_callback(request_id, response, exception):
         """Callback for batch requests"""
         results[request_id] = {"data": response, "error": exception}
 
-    # Process in smaller chunks to prevent SSL connection exhaustion
-    for chunk_start in range(0, len(thread_ids), GMAIL_BATCH_SIZE):
-        chunk_ids = thread_ids[chunk_start : chunk_start + GMAIL_BATCH_SIZE]
+    for chunk_start in range(0, len(thread_ids), GMAIL_THREAD_BATCH_SIZE):
+        chunk_ids = thread_ids[chunk_start : chunk_start + GMAIL_THREAD_BATCH_SIZE]
+        if budget.exhausted:
+            budget.withheld.extend(chunk_ids)
+            continue
         results: Dict[str, Dict] = {}
 
-        batch_completed = False
+        async with _content_read_slot(user_google_email):
+            batch_completed = False
 
-        # Try to use batch API
-        try:
-            batch = service.new_batch_http_request(callback=_batch_callback)
+            # Try to use batch API
+            try:
+                batch = service.new_batch_http_request(callback=_batch_callback)
 
-            for tid in chunk_ids:
-                req = service.users().threads().get(userId="me", id=tid, format="full")
-                batch.add(req, request_id=tid)
+                for tid in chunk_ids:
+                    req = (
+                        service.users()
+                        .threads()
+                        .get(userId="me", id=tid, format="full")
+                    )
+                    batch.add(req, request_id=tid)
 
-            # Execute batch request
-            await greenlet_spawn(batch.execute)
-            batch_completed = True
+                # Execute batch request
+                await greenlet_spawn(batch.execute)
+                batch_completed = True
 
-        except Exception as batch_error:
-            # Fallback to sequential processing instead of parallel to prevent SSL exhaustion
-            logger.warning(
-                f"[get_gmail_threads_content_batch] Batch API failed, falling back to sequential processing: {batch_error}"
-            )
-
-            # Process threads sequentially with small delays to prevent connection exhaustion
-            for tid in chunk_ids:
-                tid_result, thread_data, error = await _fetch_thread_with_retry(
-                    service,
-                    thread_id=tid,
-                    log_prefix="get_gmail_threads_content_batch",
+            except Exception as batch_error:
+                # Fallback to sequential processing instead of parallel to prevent SSL exhaustion
+                logger.warning(
+                    f"[get_gmail_threads_content_batch] Batch API failed, falling back to sequential processing: {batch_error}"
                 )
-                results[tid_result] = {"data": thread_data, "error": error}
-                # Brief delay between requests to allow connection cleanup
-                await asyncio.sleep(GMAIL_REQUEST_DELAY)
 
-        # Sub-requests that failed with a transient error (e.g. 429 rate limit)
-        # inside an otherwise successful batch response: re-fetch only those IDs
-        # and merge. The sequential fallback has already exhausted its retries.
-        retryable_ids = (
-            _retryable_result_ids(results, chunk_ids) if batch_completed else []
-        )
-        if retryable_ids:
-            logger.warning(
-                f"[get_gmail_threads_content_batch] {len(retryable_ids)}/{len(chunk_ids)} "
-                f"threads failed with retryable errors; re-fetching: {retryable_ids}"
-            )
-            await asyncio.sleep(GMAIL_RATE_LIMIT_BACKOFF)
-            for tid in retryable_ids:
-                tid_result, thread_data, error = await _fetch_thread_with_retry(
-                    service,
-                    thread_id=tid,
-                    log_prefix="get_gmail_threads_content_batch",
-                )
-                results[tid_result] = {"data": thread_data, "error": error}
-                await asyncio.sleep(GMAIL_REQUEST_DELAY)
-
-        # Process results for this chunk
-        for tid in chunk_ids:
-            entry = results.get(tid, {"data": None, "error": "No result"})
-
-            if entry["error"]:
-                output_threads.append(f"⚠️ Thread {tid}: {entry['error']}\n")
-            else:
-                thread = entry["data"]
-                if not thread:
-                    output_threads.append(f"⚠️ Thread {tid}: No data returned\n")
-                    continue
-
-                raw_contents = None
-                if body_format == "raw":
-                    message_ids = [
-                        message["id"]
-                        for message in thread.get("messages", [])
-                        if message.get("id")
-                    ]
-                    raw_contents = await _fetch_raw_message_contents(
+                # Process threads sequentially with small delays to prevent connection exhaustion
+                for tid in chunk_ids:
+                    tid_result, thread_data, error = await _fetch_thread_with_retry(
                         service,
-                        message_ids,
+                        thread_id=tid,
                         log_prefix="get_gmail_threads_content_batch",
                     )
+                    results[tid_result] = {"data": thread_data, "error": error}
+                    # Brief delay between requests to allow connection cleanup
+                    await asyncio.sleep(GMAIL_REQUEST_DELAY)
 
-                output_threads.append(
-                    _format_thread_content(
+            # Sub-requests that failed with a transient error (e.g. 429 rate limit)
+            # inside an otherwise successful batch response: re-fetch only those IDs
+            # and merge. The sequential fallback has already exhausted its retries.
+            retryable_ids = (
+                _retryable_result_ids(results, chunk_ids) if batch_completed else []
+            )
+            if retryable_ids:
+                logger.warning(
+                    f"[get_gmail_threads_content_batch] {len(retryable_ids)}/{len(chunk_ids)} "
+                    f"threads failed with retryable errors; re-fetching: {retryable_ids}"
+                )
+                await asyncio.sleep(GMAIL_RATE_LIMIT_BACKOFF)
+                for tid in retryable_ids:
+                    tid_result, thread_data, error = await _fetch_thread_with_retry(
+                        service,
+                        thread_id=tid,
+                        log_prefix="get_gmail_threads_content_batch",
+                    )
+                    results[tid_result] = {"data": thread_data, "error": error}
+                    await asyncio.sleep(GMAIL_REQUEST_DELAY)
+
+            # Process results for this chunk
+            for tid in chunk_ids:
+                if budget.exhausted:
+                    budget.withheld.append(tid)
+                    continue
+                entry = results.get(tid, {"data": None, "error": "No result"})
+
+                if entry["error"]:
+                    formatted = f"⚠️ Thread {tid}: {entry['error']}\n"
+                elif not entry["data"]:
+                    formatted = f"⚠️ Thread {tid}: No data returned\n"
+                else:
+                    thread = entry["data"]
+                    raw_contents = None
+                    if body_format == "raw":
+                        message_ids = [
+                            message["id"]
+                            for message in thread.get("messages", [])
+                            if message.get("id")
+                        ]
+                        raw_contents = await _fetch_raw_message_contents(
+                            service,
+                            message_ids,
+                            log_prefix="get_gmail_threads_content_batch",
+                        )
+                    formatted = _format_thread_content(
                         thread,
                         tid,
                         body_format=body_format,
                         raw_contents=raw_contents,
                     )
-                )
+
+                kept = budget.take(tid, formatted)
+                if kept is not None:
+                    output_threads.append(kept)
 
     # Combine all threads with separators
-    header = f"Retrieved {len(thread_ids)} threads:"
-    return header + "\n\n" + "\n---\n\n".join(output_threads)
+    retrieved = len(thread_ids) - len(budget.withheld)
+    header = (
+        f"Retrieved {retrieved} of {len(thread_ids)} threads:"
+        if budget.withheld
+        else f"Retrieved {len(thread_ids)} threads:"
+    )
+    return header + "\n\n" + "\n---\n\n".join(output_threads) + budget.note("threads")
 
 
 @server.tool(
