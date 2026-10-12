@@ -89,6 +89,13 @@ HTML_BODY_TRUNCATE_LIMIT = 20000
 # A content read's output, all items together. Past it, items are listed for
 # another call rather than formatted into one ever-larger string.
 GMAIL_CONTENT_OUTPUT_CHAR_LIMIT = 500_000
+# One read's thread text, shared across the threads it returns. Clients cap a
+# tool result (Fieldwork at 30,000 characters, after JSON escaping) by cutting
+# its middle, which in a long thread drops the opening of the newest message:
+# the reply that says where things stand. Fitting under the cap here, by
+# dropping older bodies first, keeps that reply whole.
+GMAIL_THREAD_CHAR_BUDGET = 24_000
+GMAIL_THREAD_MIN_CHAR_BUDGET = 4_000
 
 
 class _OutputBudget:
@@ -331,6 +338,105 @@ def _truncate_content(content: str, limit: int) -> str:
     if len(content) <= limit:
         return content
     return content[:limit] + "\n\n[Content truncated...]"
+
+
+# "On Thu, Oct 1, 2026 at 2:17 PM Ann <ann@x.com> wrote:", and the French,
+# German and Spanish forms. Clients wrap a long one over several lines.
+_REPLY_ATTRIBUTION = re.compile(
+    r"^(?:On\s.+\swrote|Le\s.+\sa\s+écrit|Am\s.+\sschrieb\s.+|El\s.+\sescribió)\s*:$",
+    re.IGNORECASE,
+)
+_ORIGINAL_MESSAGE = re.compile(r"^-{2,}\s*Original Message\s*-{2,}$", re.IGNORECASE)
+_OUTLOOK_FROM = re.compile(r"^\*?From:\*?\s+\S")
+_OUTLOOK_SENT = re.compile(r"^\*?Sent:\*?\s+\S")
+_FORWARD_SUBJECT = re.compile(r"^\s*(?:fwd?|tr|wg)\s*:", re.IGNORECASE)
+QUOTED_HISTORY_NOTE = (
+    "[Quoted earlier messages removed: they are above in this thread.]"
+)
+
+
+def _quoted_history_start(lines: List[str]) -> Optional[int]:
+    """Index of the line where a reply's quoted history begins, if it has one."""
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _ORIGINAL_MESSAGE.match(stripped):
+            return i
+        if _OUTLOOK_FROM.match(stripped):
+            following = [ln.strip() for ln in lines[i + 1 : i + 3] if ln.strip()]
+            if following and _OUTLOOK_SENT.match(following[0]):
+                return i
+        if stripped.startswith(("On ", "Le ", "Am ", "El ")):
+            for end in range(i, min(i + 4, len(lines))):
+                joined = " ".join(ln.strip() for ln in lines[i : end + 1])
+                # A date or an address, so a sentence that happens to start
+                # "On" and end "wrote:" is not taken for an attribution.
+                if _REPLY_ATTRIBUTION.match(joined) and re.search(r"[\d@]", joined):
+                    return _quote_body_start(lines, i, end + 1)
+    return None
+
+
+def _quote_body_start(lines: List[str], start: int, after: int) -> Optional[int]:
+    """`start`, unless the reply was written inline among `>` quoted lines."""
+    rest = [
+        ln
+        for ln in lines[after:]
+        if ln.strip() and ln.strip() != "[Content truncated...]"
+    ]
+    if rest and rest[0].lstrip().startswith(">"):
+        if any(not ln.lstrip().startswith(">") for ln in rest):
+            return None
+    return start
+
+
+def _strip_quoted_history(body: str) -> str:
+    """A reply's own text, without the earlier messages it quotes.
+
+    Each reply in a thread quotes everything before it, so a thread read with
+    its history repeats in full in every message, and a long thread grows with
+    the square of its length. The quoted messages are in the thread already.
+    """
+    lines = body.split("\n")
+    start = _quoted_history_start(lines)
+    if start is None:
+        return body
+    own = "\n".join(lines[:start]).rstrip()
+    if not own:
+        return body
+    return f"{own}\n\n{QUOTED_HISTORY_NOTE}"
+
+
+def _omitted_body_note(message_id: str) -> str:
+    return (
+        "[Body omitted so the newest messages fit in one read. Read it with "
+        f"get_gmail_messages_content_batch(message_ids=['{message_id}']).]"
+    )
+
+
+def _fit_bodies(blocks: List[Dict[str, Any]], budget: int) -> None:
+    """Drop bodies, oldest first, until the thread fits `budget`.
+
+    The newest message always keeps its body, then the first (what the thread
+    is about), then the rest from newest to oldest. Headers always stay, so
+    the reader still sees who wrote when, and can open an omitted message.
+    """
+
+    def size(block, body):
+        return sum(len(ln) + 1 for ln in block["head"] + block["tail"]) + len(body) + 2
+
+    if sum(size(b, b["body"]) for b in blocks) <= budget or len(blocks) < 2:
+        return
+    last = len(blocks) - 1
+    order = [last, 0] + list(range(last - 1, 0, -1))
+    notes = {i: _omitted_body_note(blocks[i]["id"]) for i in range(len(blocks))}
+    used = sum(size(b, notes[i]) for i, b in enumerate(blocks))
+    for i in order:
+        extra = len(blocks[i]["body"]) - len(notes[i])
+        if i == last or used + extra <= budget:
+            used += extra
+        else:
+            blocks[i]["body"] = notes[i]
 
 
 def _decode_raw_mime_content(raw_data: str) -> str:
@@ -3229,6 +3335,7 @@ def _format_thread_content(
     thread_id: str,
     body_format: Literal["text", "html", "raw"] = "text",
     raw_contents: Optional[Dict[str, str]] = None,
+    char_budget: Optional[int] = None,
 ) -> str:
     """
     Helper function to format thread content from Gmail API response.
@@ -3238,6 +3345,7 @@ def _format_thread_content(
         thread_id (str): Thread ID for display
         body_format: Output format - "text" (default), "html", or "raw"
         raw_contents: Optional mapping of message IDs to decoded raw MIME content
+        char_budget: For "text", drop older bodies until the thread fits this
 
     Returns:
         str: Formatted thread content
@@ -3259,7 +3367,7 @@ def _format_thread_content(
         "",
     ]
 
-    # Process each message in the thread
+    blocks: List[Dict[str, Any]] = []
     for i, message in enumerate(messages, 1):
         payload = message.get("payload", {})
         # Extract headers
@@ -3291,62 +3399,62 @@ def _format_thread_content(
                 text_body, html_body, body_format=body_format
             )
             body_label = "BODY"
+            if (
+                body_format == "text"
+                and i > 1
+                and not _FORWARD_SUBJECT.match(headers.get("Subject", ""))
+            ):
+                body_data = _strip_quoted_history(body_data)
 
         # Extract attachment metadata for this message
         attachments = _extract_attachments(payload)
         message_id = message.get("id", "")
 
-        # Add message to content
-        content_lines.extend(
-            [
-                f"=== Message {i} ===",
-                f"From: {sender}",
-                f"Date: {date}",
-            ]
-        )
+        head = [f"=== Message {i} ===", f"From: {sender}", f"Date: {date}"]
         if reply_to:
-            content_lines.append(f"Reply-To: {reply_to}")
-        content_lines.append(
+            head.append(f"Reply-To: {reply_to}")
+        head.append(
             f"To: {to}" if "To" in headers else "To: [not present in Gmail response]"
         )
-        content_lines.append(
+        head.append(
             f"Cc: {cc}" if "Cc" in headers else "Cc: [not present in Gmail response]"
         )
 
         if rfc822_message_id:
-            content_lines.append(f"Message-ID: {rfc822_message_id}")
+            head.append(f"Message-ID: {rfc822_message_id}")
         if in_reply_to:
-            content_lines.append(f"In-Reply-To: {in_reply_to}")
+            head.append(f"In-Reply-To: {in_reply_to}")
         if references:
-            content_lines.append(f"References: {references}")
+            head.append(f"References: {references}")
 
         # Only show subject if it's different from thread subject
         if subject != thread_subject:
-            content_lines.append(f"Subject: {subject}")
+            head.append(f"Subject: {subject}")
 
+        head.append("")
         if body_format == "raw":
-            content_lines.extend(
-                [
-                    "",
-                    f"--- {body_label} ---",
-                    body_data,
-                    "",
-                ]
-            )
-        else:
-            content_lines.extend(["", body_data, ""])
+            head.append(f"--- {body_label} ---")
 
+        tail = [""]
         if attachments:
-            content_lines.append("--- ATTACHMENTS ---")
+            tail.append("--- ATTACHMENTS ---")
             for j, att in enumerate(attachments, 1):
                 size_kb = att["size"] / 1024
-                content_lines.append(
+                tail.append(
                     f"{j}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
                     f"   Part ID: {att['partId']} (use as part_id when saving to Drive)\n"
                     f"   Attachment ID: {att['attachmentId']}\n"
                     f"   Use get_gmail_attachment_content(message_id='{message_id}', attachment_id='{att['attachmentId']}') to download"
                 )
-            content_lines.append("")
+            tail.append("")
+
+        blocks.append({"id": message_id, "head": head, "body": body_data, "tail": tail})
+
+    if body_format == "text" and char_budget is not None:
+        _fit_bodies(blocks, char_budget - sum(len(ln) + 1 for ln in content_lines))
+
+    for block in blocks:
+        content_lines.extend([*block["head"], block["body"], *block["tail"]])
 
     return "\n".join(content_lines)
 
@@ -3445,6 +3553,7 @@ async def get_gmail_thread_content(
             thread_id,
             body_format=body_format,
             raw_contents=raw_contents,
+            char_budget=GMAIL_THREAD_CHAR_BUDGET,
         ),
     )
 
@@ -3510,6 +3619,9 @@ async def get_gmail_threads_content_batch(
 
     output_threads = []
     budget = _OutputBudget(GMAIL_CONTENT_OUTPUT_CHAR_LIMIT)
+    thread_budget = max(
+        GMAIL_THREAD_MIN_CHAR_BUDGET, GMAIL_THREAD_CHAR_BUDGET // len(thread_ids)
+    )
 
     def _keep(item_id, text):
         kept = budget.take(item_id, text)
@@ -3615,6 +3727,7 @@ async def get_gmail_threads_content_batch(
                         tid,
                         body_format=body_format,
                         raw_contents=raw_contents,
+                        char_budget=thread_budget,
                     ),
                 )
 
