@@ -1311,6 +1311,29 @@ async def _resolve_url_attachments(
     return resolved
 
 
+_REPLY_PREFIX_RE = re.compile(r"^(?:\s*(?:re|fwd?)\s*:)+", re.IGNORECASE)
+
+
+def _base_subject(subject: str) -> str:
+    return " ".join(_REPLY_PREFIX_RE.sub("", subject).split()).casefold()
+
+
+def _reply_subject(
+    subject: str, in_reply_to: Optional[str], original_subject: Optional[str]
+) -> str:
+    """Prefix 'Re: ' to a reply that keeps its thread's subject.
+
+    A caller that deliberately renames a reply ("November update" on last
+    month's thread) keeps its subject as written. Without the original subject
+    every reply is prefixed, as before.
+    """
+    if not in_reply_to or subject.lower().startswith("re:"):
+        return subject
+    if original_subject and _base_subject(subject) != _base_subject(original_subject):
+        return subject
+    return f"Re: {subject}"
+
+
 def _prepare_gmail_message(
     subject: str,
     body: str,
@@ -1324,6 +1347,7 @@ def _prepare_gmail_message(
     from_email: Optional[str] = None,
     from_name: Optional[str] = None,
     attachments: Optional[List[Dict[str, str]]] = None,
+    original_subject: Optional[str] = None,
 ) -> tuple[str, Optional[str], int, List[str]]:
     """
     Prepare a Gmail message with threading and attachment support.
@@ -1341,15 +1365,13 @@ def _prepare_gmail_message(
         from_email: Optional sender email address
         from_name: Optional sender display name (e.g., "Peter Hartree")
         attachments: Optional list of attachments. Each can have 'path' (file path) OR 'content' (base64) + 'filename'
+        original_subject: Optional subject of the message being replied to
 
     Returns:
         Tuple of (raw_message, thread_id, attached_count, attachment_errors)
         where raw_message is base64 encoded.
     """
-    # Handle reply subject formatting
-    reply_subject = subject
-    if in_reply_to and not subject.lower().startswith("re:"):
-        reply_subject = f"Re: {subject}"
+    reply_subject = _reply_subject(subject, in_reply_to, original_subject)
 
     # Prepare the email
     normalized_format = body_format.lower()
@@ -2539,7 +2561,7 @@ async def send_gmail_message(
     subject: Annotated[
         Optional[str],
         Field(
-            description="Email subject. Required when sending; optional when forwarding (defaults to 'Fwd: <original subject>').",
+            description="Email subject. Required when sending; optional when forwarding (defaults to 'Fwd: <original subject>'). A reply that keeps its thread's subject is prefixed 'Re: '; a different subject is kept as written, and Gmail then lists the reply as a new conversation, though it still carries the reply headers.",
         ),
     ] = None,
     body: Annotated[
@@ -2884,6 +2906,7 @@ async def send_gmail_message(
             from_email=sender_email,
             from_name=from_name,
             attachments=resolved_attachments if resolved_attachments else None,
+            original_subject=target_reply.get("subject") if target_reply else None,
         )
     )
 
@@ -3056,7 +3079,12 @@ async def _forward_gmail_message_impl(
 async def draft_gmail_message(
     service,
     user_google_email: str,
-    subject: Annotated[str, Field(description="Email subject.")],
+    subject: Annotated[
+        str,
+        Field(
+            description="Email subject. A reply that keeps its thread's subject is prefixed 'Re: '; a different subject is kept as written, and Gmail then lists the reply as a new conversation, though it still carries the reply headers."
+        ),
+    ],
     body: Annotated[str, Field(description="Email body (plain text).")],
     body_format: Annotated[
         Literal["plain", "html"],
@@ -3297,6 +3325,7 @@ async def draft_gmail_message(
             from_email=sender_email,
             from_name=from_name,
             attachments=resolved_attachments,
+            original_subject=target_reply.get("subject") if target_reply else None,
         )
     )
 
