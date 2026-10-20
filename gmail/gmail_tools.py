@@ -18,8 +18,9 @@ from typing import Annotated, Optional, List, Dict, Literal, Any, Union
 from urllib.parse import quote, unquote, urlparse, urlunsplit
 
 from email.message import EmailMessage
+from email.parser import BytesParser
 from email.policy import SMTP
-from email.utils import formataddr
+from email.utils import formataddr, parseaddr
 
 import httpx
 from mcp.types import ToolAnnotations
@@ -895,6 +896,17 @@ def _normalize_attachment_content_id(content_id: Any) -> str:
     return cid_value
 
 
+def _stored_content_id(content_id: Any) -> str:
+    """A stored part's Content-ID without its brackets, refusing only what would break the header."""
+    raw = str(content_id)
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise ValueError("content_id contains invalid control characters")
+    cid_value = raw.strip().strip("<>").strip()
+    if not cid_value:
+        raise ValueError("content_id must not be empty")
+    return cid_value
+
+
 def _format_base64_content_block(urlsafe_b64_data: str) -> List[str]:
     """
     Convert Gmail's URL-safe base64 attachment data to standard base64 and
@@ -1348,6 +1360,7 @@ def _prepare_gmail_message(
     from_name: Optional[str] = None,
     attachments: Optional[List[Dict[str, str]]] = None,
     original_subject: Optional[str] = None,
+    prefix_reply_subject: bool = True,
 ) -> tuple[str, Optional[str], int, List[str]]:
     """
     Prepare a Gmail message with threading and attachment support.
@@ -1366,12 +1379,18 @@ def _prepare_gmail_message(
         from_name: Optional sender display name (e.g., "Peter Hartree")
         attachments: Optional list of attachments. Each can have 'path' (file path) OR 'content' (base64) + 'filename'
         original_subject: Optional subject of the message being replied to
+        prefix_reply_subject: False when the subject is already final, as a
+            stored draft's is: it is then used exactly as given
 
     Returns:
         Tuple of (raw_message, thread_id, attached_count, attachment_errors)
         where raw_message is base64 encoded.
     """
-    reply_subject = _reply_subject(subject, in_reply_to, original_subject)
+    reply_subject = (
+        _reply_subject(subject, in_reply_to, original_subject)
+        if prefix_reply_subject
+        else subject
+    )
 
     # Prepare the email
     normalized_format = body_format.lower()
@@ -1485,7 +1504,14 @@ def _prepare_gmail_message(
                 else ("application", "octet-stream")
             )
             if content_id:
-                cid_value = _normalize_attachment_content_id(content_id)
+                # A part carried over from a stored draft keeps the Content-ID
+                # its HTML already references, which another client may have
+                # spelled outside the stricter set accepted from callers.
+                cid_value = (
+                    _stored_content_id(content_id)
+                    if attachment.get("_stored")
+                    else _normalize_attachment_content_id(content_id)
+                )
                 if cid_value in seen_content_ids:
                     logger.warning(
                         "Duplicate content_id on attachment: content_id_len=%d, "
@@ -3357,6 +3383,530 @@ async def draft_gmail_message(
         attached_count, requested_attachment_count
     )
     return f"Draft created{attachment_info}! Draft ID: {draft_id}"
+
+
+def _decode_gmail_raw(raw_message: str) -> bytes:
+    """A `format=raw` message's bytes. Gmail's urlsafe base64 may come unpadded."""
+    return base64.urlsafe_b64decode(raw_message + "=" * (-len(raw_message) % 4))
+
+
+def _stored_draft_parts(raw_message: str) -> Dict[str, Any]:
+    """
+    Split a stored draft into what _prepare_gmail_message builds a message from.
+
+    The body is the HTML part when there is one (the builder derives the plain
+    alternative from it again), else the plain part. Every other leaf part is
+    an attachment, kept with its bytes, type and Content-ID, so a rebuilt draft
+    carries its files and inline images over unchanged.
+    """
+    message = BytesParser(policy=SMTP).parsebytes(_decode_gmail_raw(raw_message))
+    body_part = message.get_body(preferencelist=("html", "plain"))
+    body = body_part.get_content() if body_part is not None else ""
+    body_format: Literal["plain", "html"] = (
+        "html"
+        if body_part is not None and body_part.get_content_subtype() == "html"
+        else "plain"
+    )
+
+    attachments: List[Dict[str, Any]] = []
+    for part in message.walk():
+        if part.is_multipart() or part is body_part:
+            continue
+        filename = part.get_filename()
+        content_id = part.get("Content-ID")
+        if (
+            not filename
+            and not content_id
+            and part.get_content_disposition() != "attachment"
+            and part.get_content_type() in ("text/plain", "text/html")
+        ):
+            # The body's other alternative.
+            continue
+        attachment: Dict[str, Any] = {
+            "_resolved_bytes": part.get_payload(decode=True) or b"",
+            "_stored": True,
+            "filename": filename or "attachment",
+            "mime_type": part.get_content_type(),
+        }
+        if content_id:
+            attachment["content_id"] = str(content_id)
+        attachments.append(attachment)
+
+    def header(name: str) -> Optional[str]:
+        value = message.get(name)
+        return str(value) if value is not None else None
+
+    return {
+        "subject": header("Subject") or "",
+        "from": header("From"),
+        "to": header("To"),
+        "cc": header("Cc"),
+        "bcc": header("Bcc"),
+        "in_reply_to": header("In-Reply-To"),
+        "references": header("References"),
+        "body": body,
+        "body_format": body_format,
+        "attachments": attachments,
+    }
+
+
+def _format_draft_list(
+    drafts: List[Dict[str, Any]],
+    user_google_email: str,
+    query: Optional[str],
+    next_page_token: Optional[str],
+    headers_by_id: Dict[str, Optional[Dict[str, str]]],
+) -> str:
+    matching = f" matching '{query}'" if query else ""
+    if not drafts:
+        return f"No drafts found{matching}."
+
+    lines = [f"Found {len(drafts)} drafts{matching}:", ""]
+    for i, draft in enumerate(drafts, 1):
+        message = draft.get("message") or {}
+        message_id = message.get("id")
+        lines.append(f"  {i}. Draft ID: {draft.get('id', 'unknown')}")
+        lines.append(f"     Message ID: {message_id or 'unknown'}")
+        lines.append(f"     Thread ID: {message.get('threadId') or 'unknown'}")
+        headers = headers_by_id.get(message_id) if message_id else None
+        if headers is None:
+            lines.append("     Headers: unavailable (metadata fetch failed)")
+        else:
+            lines.extend(
+                [
+                    f"     To: {headers.get('To') or '(no recipients)'}",
+                    *([f"     Cc: {headers['Cc']}"] if headers.get("Cc") else []),
+                    f"     Subject: {headers.get('Subject') or '(no subject)'}",
+                    f"     Date: {headers.get('Date') or '(unknown date)'}",
+                ]
+            )
+        if message_id:
+            lines.append(
+                f"     Web Link: {_generate_gmail_web_url(message_id, user_google_email)}"
+            )
+        lines.append("")
+
+    lines.extend(
+        [
+            "💡 USAGE:",
+            "  • Read a draft's body with get_gmail_message_content(message_id=...)",
+            "  • Change it with update_gmail_draft(draft_id=...), send it with send_gmail_draft(draft_id=...)",
+        ]
+    )
+    if next_page_token:
+        lines.append("")
+        lines.append(
+            f"📄 PAGINATION: To get the next page, call list_gmail_drafts again with page_token='{next_page_token}'"
+        )
+    return "\n".join(lines)
+
+
+@server.tool(
+    title="List Gmail Drafts",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("list_gmail_drafts", is_read_only=True, service_type="gmail")
+@require_google_service("gmail", "gmail_read")
+async def list_gmail_drafts(
+    service,
+    user_google_email: str,
+    query: Annotated[
+        Optional[str],
+        Field(
+            description="Optional Gmail search query to narrow the drafts (e.g. 'to:alex@example.com' or 'subject:invoice').",
+        ),
+    ] = None,
+    page_size: int = 10,
+    page_token: Optional[str] = None,
+) -> str:
+    """
+    Lists drafts in the user's Gmail account, newest first, with each draft's
+    recipients, subject and date.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        query (Optional[str]): Optional Gmail search query to narrow the drafts.
+        page_size (int): The maximum number of drafts to return. Defaults to 10.
+        page_token (Optional[str]): Token for the next page, from a previous response.
+
+    Returns:
+        str: Each draft's Draft ID (for update_gmail_draft, send_gmail_draft and
+        delete_gmail_draft), Message ID (for get_gmail_message_content), Thread ID,
+        recipients, subject and date.
+    """
+    logger.info(
+        f"[list_gmail_drafts] Email: '{user_google_email}', query_len={len(query or '')}, Page size: {page_size}"
+    )
+    request_params: Dict[str, Any] = {"userId": "me", "maxResults": page_size}
+    if query:
+        request_params["q"] = query
+    if page_token:
+        request_params["pageToken"] = page_token
+
+    response = await greenlet_spawn(
+        service.users().drafts().list(**request_params).execute
+    )
+    drafts = [d for d in (response or {}).get("drafts") or [] if isinstance(d, dict)]
+    message_ids = [
+        d["message"]["id"] for d in drafts if (d.get("message") or {}).get("id")
+    ]
+    headers_by_id: Dict[str, Optional[Dict[str, str]]] = {}
+    if message_ids:
+        try:
+            headers_by_id = await _fetch_search_result_headers(service, message_ids)
+        except Exception as exc:
+            logger.exception(
+                "[list_gmail_drafts] Header enrichment failed; listing drafts without headers: %s",
+                exc,
+            )
+    return _format_draft_list(
+        drafts,
+        user_google_email,
+        query,
+        (response or {}).get("nextPageToken"),
+        headers_by_id,
+    )
+
+
+@server.tool(
+    title="Update Gmail Draft",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("update_gmail_draft", service_type="gmail")
+@require_google_service("gmail", GMAIL_COMPOSE_SCOPE)
+async def update_gmail_draft(
+    service,
+    user_google_email: str,
+    draft_id: Annotated[
+        str,
+        Field(
+            description="The draft to change: the Draft ID from draft_gmail_message or list_gmail_drafts (not its Message ID).",
+        ),
+    ],
+    subject: Annotated[
+        Optional[str],
+        Field(
+            description="New subject. Omit to keep the current one. On a reply, a subject that keeps the thread's is prefixed 'Re: ' as in draft_gmail_message; a different one is kept as written.",
+        ),
+    ] = None,
+    body: Annotated[
+        Optional[str],
+        Field(
+            description="The complete new body, replacing the current one. Omit to keep it. Write it as for draft_gmail_message: without the signature, which is appended again unless include_signature is false.",
+        ),
+    ] = None,
+    body_format: Annotated[
+        Literal["plain", "html"],
+        Field(
+            description="Format of the new body: 'plain' or 'html'. Only used with body.",
+        ),
+    ] = "plain",
+    to: Annotated[
+        Optional[str],
+        Field(
+            description="New To recipients, replacing the current ones (comma-separated). Omit to keep them; an empty string removes them.",
+        ),
+    ] = None,
+    cc: Annotated[
+        Optional[str],
+        Field(
+            description="New CC recipients, replacing the current ones. Omit to keep them; an empty string removes them.",
+        ),
+    ] = None,
+    bcc: Annotated[
+        Optional[str],
+        Field(
+            description="New BCC recipients, replacing the current ones. Omit to keep them; an empty string removes them.",
+        ),
+    ] = None,
+    from_email: Annotated[
+        Optional[str],
+        Field(
+            description="A different 'Send As' alias to send from, configured in Gmail settings. Omit to keep the current sender.",
+        ),
+    ] = None,
+    from_name: Annotated[
+        Optional[str],
+        Field(
+            description="A different sender display name. Omit to keep the current one.",
+        ),
+    ] = None,
+    attachments: Annotated[
+        Optional[DictList],
+        Field(
+            description="Attachments to add, in the same shapes draft_gmail_message takes ('content' + 'filename', or 'url'). The draft's existing attachments are kept.",
+        ),
+    ] = None,
+    remove_attachments: Annotated[
+        Optional[List[str]],
+        Field(
+            description="Filenames of existing attachments to remove, matched case-insensitively.",
+        ),
+    ] = None,
+    include_signature: Annotated[
+        bool,
+        Field(
+            description="Whether to append the sender's Gmail signature to a new body. Defaults to true; ignored without body.",
+        ),
+    ] = True,
+    quote_original: Annotated[
+        bool,
+        Field(
+            description="Whether to quote the message being replied to below a new body, as draft_gmail_message does. Pass it again if the draft quoted the original, or the quote goes with the old body. Ignored without body or on a draft that is not a reply.",
+        ),
+    ] = False,
+) -> str:
+    """
+    Changes an existing Gmail draft in place, keeping its Draft ID.
+
+    Only the fields given change. Everything else the draft has is kept as it
+    is: recipients, subject, body, sender, attachments and inline images, and a
+    reply's thread and reply headers, so the draft stays in its conversation.
+
+    Gmail replaces a draft's whole message on every update, so the draft gets a
+    new Message ID each time; its Draft ID stays the same. If the person is
+    editing the same draft in Gmail at that moment, whichever save lands last
+    wins.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        draft_id (str): The Draft ID of the draft to change.
+        subject, body, body_format, to, cc, bcc, from_email, from_name: The
+            fields to change; omit any to keep it.
+        attachments: Attachments to add.
+        remove_attachments: Filenames of existing attachments to remove.
+        include_signature (bool): Append the Gmail signature to a new body.
+        quote_original (bool): Quote the replied-to message below a new body.
+
+    Returns:
+        str: Confirmation with the Draft ID and the draft's new Message ID.
+    """
+    logger.info(
+        f"[update_gmail_draft] Invoked. Email: '{user_google_email}', fields="
+        + ",".join(
+            name
+            for name, value in (
+                ("subject", subject),
+                ("body", body),
+                ("to", to),
+                ("cc", cc),
+                ("bcc", bcc),
+                ("from_email", from_email),
+                ("from_name", from_name),
+                ("attachments", attachments),
+                ("remove_attachments", remove_attachments),
+            )
+            if value is not None
+        )
+    )
+
+    stored_draft = await greenlet_spawn(
+        service.users().drafts().get(userId="me", id=draft_id, format="raw").execute
+    )
+    stored_message = (stored_draft or {}).get("message") or {}
+    if not stored_message.get("raw"):
+        raise UserInputError(f"Draft {draft_id} has no message to update.")
+    stored = _stored_draft_parts(stored_message["raw"])
+    thread_id = stored_message.get("threadId")
+    in_reply_to, references = stored["in_reply_to"], stored["references"]
+
+    kept_attachments = stored["attachments"]
+    if remove_attachments:
+        removing = {name.casefold() for name in remove_attachments}
+        present = {a["filename"].casefold() for a in kept_attachments}
+        missing = sorted(
+            name for name in remove_attachments if name.casefold() not in present
+        )
+        if missing:
+            raise UserInputError(
+                f"The draft has no attachment named {', '.join(repr(m) for m in missing)}. "
+                f"Its attachments are: {', '.join(repr(a['filename']) for a in kept_attachments) or 'none'}."
+            )
+        kept_attachments = [
+            a for a in kept_attachments if a["filename"].casefold() not in removing
+        ]
+
+    stored_name, stored_address = parseaddr(stored["from"] or "")
+    sender_email = from_email or stored_address or user_google_email
+    sender_name = from_name if from_name is not None else (stored_name or None)
+
+    if body is None:
+        draft_body, draft_format = stored["body"], stored["body_format"]
+    else:
+        draft_format = body_format
+        signature_html = ""
+        if include_signature:
+            _identity, signature_html = await _get_send_as_identity_and_signature(
+                service, from_email=sender_email, fallback_email=user_google_email
+            )
+        original = (
+            await _fetch_original_for_quote(service, thread_id, in_reply_to)
+            if quote_original and thread_id and in_reply_to
+            else None
+        )
+        draft_body = (
+            _build_quoted_reply_body(body, body_format, signature_html, original)
+            if original
+            else _append_signature_to_body(body, body_format, signature_html)
+        )
+
+    resolved_new = await _resolve_url_attachments(attachments) or []
+    raw_message, _thread_id, attached_count, attachment_errors = _prepare_gmail_message(
+        subject=(
+            stored["subject"]
+            if subject is None
+            else _reply_subject(subject, in_reply_to, stored["subject"])
+        ),
+        body=draft_body,
+        body_format=draft_format,
+        to=stored["to"] if to is None else to,
+        cc=stored["cc"] if cc is None else cc,
+        bcc=stored["bcc"] if bcc is None else bcc,
+        in_reply_to=in_reply_to,
+        references=references,
+        from_email=sender_email,
+        from_name=sender_name,
+        attachments=kept_attachments + resolved_new,
+        prefix_reply_subject=False,
+    )
+
+    # Never save a draft that silently lost a file: a part that could not be
+    # carried over, or a new one that could not be added, fails the update.
+    expected = len(kept_attachments) + len(resolved_new)
+    if attached_count != expected:
+        details = (
+            f" Details: {'; '.join(attachment_errors)}" if attachment_errors else ""
+        )
+        raise UserInputError(
+            f"The draft was not updated: {expected - attached_count} of its "
+            f"{expected} attachment(s) could not be attached.{details}"
+        )
+
+    update_body: Dict[str, Any] = {"id": draft_id, "message": {"raw": raw_message}}
+    # As in draft_gmail_message: a thread id without the reply headers is an
+    # invalid threading request, and a new draft has no thread to keep.
+    if thread_id and in_reply_to and references:
+        update_body["message"]["threadId"] = thread_id
+
+    updated = await greenlet_spawn(
+        service.users()
+        .drafts()
+        .update(userId="me", id=draft_id, body=update_body)
+        .execute,
+        num_retries=GOOGLE_API_WRITE_RETRIES,
+    )
+    new_message_id = ((updated or {}).get("message") or {}).get("id")
+    changes = []
+    if resolved_new:
+        changes.append(f"added {len(resolved_new)} attachment(s)")
+    removed = len(stored["attachments"]) - len(kept_attachments)
+    if removed:
+        changes.append(f"removed {removed} attachment(s)")
+    change_info = f" ({', '.join(changes)})" if changes else ""
+    # "Draft ID:" ends its line: callers read the id as the token after it.
+    return (
+        f"Draft updated{change_info}! Draft ID: {(updated or {}).get('id') or draft_id}\n"
+        f"Message ID: {new_message_id or 'unknown'}"
+    )
+
+
+@server.tool(
+    title="Send Gmail Draft",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("send_gmail_draft", service_type="gmail")
+# drafts.send itself needs only gmail.compose, but sending is the send
+# permission level's to grant: a gmail:drafts server can write drafts and
+# never send them.
+@require_google_service("gmail", [GMAIL_COMPOSE_SCOPE, GMAIL_SEND_SCOPE])
+async def send_gmail_draft(
+    service,
+    user_google_email: str,
+    draft_id: Annotated[
+        str,
+        Field(
+            description="The draft to send: the Draft ID from draft_gmail_message, update_gmail_draft or list_gmail_drafts (not its Message ID).",
+        ),
+    ],
+) -> str:
+    """
+    Sends an existing Gmail draft exactly as it is saved: its recipients,
+    subject, body, attachments and thread. Gmail removes the draft once it is
+    sent.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        draft_id (str): The Draft ID of the draft to send.
+
+    Returns:
+        str: Confirmation with the sent message's ID and thread ID.
+    """
+    logger.info(f"[send_gmail_draft] Invoked. Email: '{user_google_email}'")
+    # Safe to retry: a sent draft no longer exists, so a retry after a send
+    # that succeeded fails with not-found instead of sending twice.
+    sent = await greenlet_spawn(
+        service.users().drafts().send(userId="me", body={"id": draft_id}).execute,
+        num_retries=GOOGLE_API_WRITE_RETRIES,
+    )
+    return (
+        f"Draft sent! Message ID: {(sent or {}).get('id') or 'unknown'}\n"
+        f"Thread ID: {(sent or {}).get('threadId') or 'unknown'}"
+    )
+
+
+@server.tool(
+    title="Delete Gmail Draft",
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+@handle_http_errors("delete_gmail_draft", service_type="gmail")
+@require_google_service("gmail", GMAIL_COMPOSE_SCOPE)
+async def delete_gmail_draft(
+    service,
+    user_google_email: str,
+    draft_id: Annotated[
+        str,
+        Field(
+            description="The draft to delete: its Draft ID (not its Message ID).",
+        ),
+    ],
+) -> str:
+    """
+    Permanently deletes a Gmail draft. It does not go to Trash and cannot be
+    recovered. Only drafts can be deleted this way; no other message can.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        draft_id (str): The Draft ID of the draft to delete.
+
+    Returns:
+        str: Confirmation naming the deleted draft.
+    """
+    logger.info(f"[delete_gmail_draft] Invoked. Email: '{user_google_email}'")
+    await greenlet_spawn(
+        service.users().drafts().delete(userId="me", id=draft_id).execute,
+        num_retries=GOOGLE_API_WRITE_RETRIES,
+    )
+    return f"Draft {draft_id} deleted."
 
 
 def _format_thread_content(
