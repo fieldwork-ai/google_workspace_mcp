@@ -126,7 +126,7 @@ List drafts, newest first, with each one's Draft ID, Message ID, Thread ID, reci
 | page_token | string | no | | From a previous response |
 
 ### update_gmail_draft
-Change a draft in place. Only the fields given change; everything else (recipients, subject, body, sender, attachments, inline images, and a reply's thread and reply headers) is kept. The Draft ID stays the same; Gmail gives the draft a new Message ID on every update.
+Change a draft in place. Only the fields given change; everything else (recipients, subject, body, sender, attachments, inline images, and a reply's thread and reply headers) is kept. The Draft ID stays the same; Gmail gives the draft a new Message ID on every update, so read it again from `list_gmail_drafts`.
 
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|

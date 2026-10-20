@@ -3674,9 +3674,9 @@ async def update_gmail_draft(
     reply's thread and reply headers, so the draft stays in its conversation.
 
     Gmail replaces a draft's whole message on every update, so the draft gets a
-    new Message ID each time; its Draft ID stays the same. If the person is
-    editing the same draft in Gmail at that moment, whichever save lands last
-    wins.
+    new Message ID each time; its Draft ID stays the same, and
+    list_gmail_drafts gives the current Message ID. If the person is editing
+    the same draft in Gmail at that moment, whichever save lands last wins.
 
     Args:
         user_google_email (str): The user's Google email address. Required.
@@ -3689,7 +3689,7 @@ async def update_gmail_draft(
         quote_original (bool): Quote the replied-to message below a new body.
 
     Returns:
-        str: Confirmation with the Draft ID and the draft's new Message ID.
+        str: Confirmation with the Draft ID.
     """
     logger.info(
         f"[update_gmail_draft] Invoked. Email: '{user_google_email}', fields="
@@ -3805,7 +3805,6 @@ async def update_gmail_draft(
         .execute,
         num_retries=GOOGLE_API_WRITE_RETRIES,
     )
-    new_message_id = ((updated or {}).get("message") or {}).get("id")
     changes = []
     if resolved_new:
         changes.append(f"added {len(resolved_new)} attachment(s)")
@@ -3813,10 +3812,11 @@ async def update_gmail_draft(
     if removed:
         changes.append(f"removed {removed} attachment(s)")
     change_info = f" ({', '.join(changes)})" if changes else ""
-    # "Draft ID:" ends its line: callers read the id as the token after it.
+    # No Message ID: whatever saves the draft next (the person in Gmail, or a
+    # client adding its own line) replaces it again, so only the Draft ID
+    # stays true. list_gmail_drafts reads the current one.
     return (
-        f"Draft updated{change_info}! Draft ID: {(updated or {}).get('id') or draft_id}\n"
-        f"Message ID: {new_message_id or 'unknown'}"
+        f"Draft updated{change_info}! Draft ID: {(updated or {}).get('id') or draft_id}"
     )
 
 

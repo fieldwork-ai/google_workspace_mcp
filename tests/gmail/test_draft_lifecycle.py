@@ -147,7 +147,7 @@ async def test_update_changing_only_recipients_keeps_everything_else():
     assert parts["chart.png"]["Content-ID"] == "<ii_abc123>"
     assert parts["chart.png"].get_content_disposition() == "inline"
 
-    assert result == "Draft updated! Draft ID: r-draft-1\nMessage ID: msg-new"
+    assert result == "Draft updated! Draft ID: r-draft-1"
     # The app reads the draft id as the token after "Draft ID:".
     assert re.search(r"Draft ID:\s*([^\s\"]+)", result).group(1) == "r-draft-1"
 
