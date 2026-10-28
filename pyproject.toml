@@ -167,4 +167,5 @@ core = ["tool_tiers.yaml"]
 constraint-dependencies = [
     "mcp>=1.28.1",    # GHSA: HTTP principal verification, WS Host/Origin, cross-client tasks
     "pyasn1>=0.6.4",  # GHSA: REAL-decode resource consumption, quadratic OID DoS
+    "authlib>=1.9.0", # CVE-2026-96760: JWS JSON with empty signatures accepted as verified
 ]
