@@ -170,4 +170,5 @@ constraint-dependencies = [
     "authlib>=1.9.0", # CVE-2026-96760: JWS JSON with empty signatures accepted as verified
     "joserfc>=1.7.5", # CVE-2026-119283
     "dnspython>=2.9.0", # CVE-2026-114605
+    "oauthlib>=4.0.1",  # CVE-2026-49272
 ]
